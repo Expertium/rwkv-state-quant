@@ -23,6 +23,12 @@ codebook = one alternating-optimization round, zero bit cost; (3) **m4b8 WKV + i
 bits; adding the int3-shift tax (~+0.0004-7) lands ~+0.0028 ⇒ pursue only if m4ep50 shows m4b8 scaling much
 better with epochs; (4) larger-ncent codebooks (m2b9+)
 are OVER budget (360 b) — skip. Schemes must fit ≤352 b; judged only by VAL log-loss, robust per-user.
+**Progress (21:50):** co-adapted codebook BUILT (`pq_cb_m2b8_coad.txt`, 120k dirs/role dumped from the ep75
+net under PQ deploy). Cheap diagnostic queued before committing GPU: ep75 weights deployed with the coad
+codebook, NO retraining (tag `e75coad`, 1 pass) — bounds what the co-adapt re-QAT can gain (consistency vs
+codebook-fit). CPU chain: m4ep50 eval (m4b8 epoch-scaling question) → coad-PTQ diagnostic. GPU: ep100
+(started 21:43) → ep150 → ep200. Data-driven decision point at the ep100 readout: if the epoch trend has
+saturated, truncate sweep3 and give the GPU to the co-adapt re-QAT at the best epoch count instead.
 **Pipeline for the new objective (staged 2026-07-02 ~20:45):** GPU chain: m4ep50 → ep100 → ep150 → ep200
 (sweep3, lever 1). CPU chain: c30 combo eval → ep75 dev-confirm → **co-adapt dump+retrain** (lever 2 prep:
 `scratchpad/coad_dump.sh` dumps 20-user card+note corpus from the ep75 net UNDER PQ deploy →
