@@ -17,7 +17,7 @@ one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit flo
 "token-shift" vectors. Raw size: `2 × 16 × 16 × 32 bits ≈ 16 kbit ≈ 2 KB` per card. A power user has
 ~1,000,000 cards, so raw states are gigabytes. The final scheme stores each card in **352 bits** —
 a ~47× reduction — while predicting recall *essentially as well as the uncompressed model* (log-loss
-penalty +0.0021/+0.0012, within the ≤ +0.0025 gate). The rest of this note climbs
+degradation +0.0021/+0.0012, within the ≤ +0.0025 gate). The rest of this note climbs
 the five levels that get there.
 
 ---
@@ -211,7 +211,7 @@ from Levels 1–2.
 
 Per layer that is: 2 heads × 2 factors × 16 numbers = **64 numbers** at 4 bits = **256 bits** for the
 WKV, plus 256 bits of int4 token-shifts → **card = 512 bits**. With QAT this scheme reached
-+0.0024/+0.0021 log-loss penalty — the project's first accepted win, at 512 b/card.
++0.0024/+0.0021 log-loss degradation — the project's first accepted win, at 512 b/card.
 
 But look where the bits go: each *direction* (a 16-dim unit vector) costs 16 × 4 = **64 bits**. The
 magnitude is one cheap scalar; the direction is what's expensive. Level 5 attacks exactly that.
@@ -380,7 +380,7 @@ Two findings made the 352-bit scheme work:
    robustness. The compression in the QAT forward is verified bit-compatible with the Rust deploy
    path to ~1e-7.
 2. **Train long enough.** With a short fine-tune, PQ passed most of its cost as a drifted base model.
-   Training longer let the base *recover under the compressed regime* — the penalty fell monotonically
+   Training longer let the base *recover under the compressed regime* — the degradation fell monotonically
    with fine-tune length, to the point where the PQ-compressed model slightly **beats its own
    uncompressed weights** (the compression acts as a familiar, trained-for representation, not an
    injury). Final numbers at 352 b: PTQ +0.0046 → QAT +0.0021/+0.0012.
@@ -412,7 +412,7 @@ Two findings made the 352-bit scheme work:
   …and separately: token-shift vectors → int4 with per-vector scales     (Levels 1–2, 256 b)
 ```
 
-| scheme | card bits | log-loss penalty (imm / ahead) |
+| scheme | card bits | log-loss degradation (imm / ahead) |
 |---|---|---|
 | raw fp32 | ~18,432 | 0 (reference) |
 | Level 4: rank-1 int4 + QAT | 512 | +0.0024 / +0.0021 |
