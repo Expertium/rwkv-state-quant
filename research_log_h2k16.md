@@ -39,7 +39,13 @@ codebook, NO retraining (tag `e75coad`, 1 pass) — bounds what the co-adapt re-
 codebook-fit). CPU chain: m4ep50 eval (m4b8 epoch-scaling question) → coad-PTQ diagnostic. GPU: ep100
 (started 21:43) → ep150 → ep200. **UPDATE 22:53: diagnostic read out NEGATIVE (see lever 2 above) — the
 co-adapt re-QAT is cancelled; the GPU chain stays ep100 → ep150 → ep200 → F28 as queued.** Remaining live
-levers: epochs (sweep3) and m4b8+int3shift (F28).
+levers: epochs (sweep3) and m4b8+int3shift (F28). **UPDATE 23:00: the whole readout pipeline is now
+self-driving** — four detached wait→convert→eval chains launched (PIDs 42608/5580/36900/18872):
+`pq_epsweep_eval.sh` (generic, per-N: polls `qat_qat_pq_epN.log` for DONE_EXIT_0 → `pth_to_sft.py` →
+2-pass RAW VAL eval, tags `eN_base`/`eN_pq`) via `pq_ep{100,150,200}_chain.cmd`, and `pq_m4s3_eval.sh`
+(F28 @ exactly 352 b: m4b8 codebook + `RWKV_STATE_SHIFT_LEVEL=int3`) via `pq_m4s3_chain.cmd`. Each aborts
+loudly if its training doesn't end DONE_EXIT_0. (Ops note: a monitor grepping a log for `DONE_EXIT` must
+use `DONE_EXIT_[0-9]` — a status line echoing the *word* DONE_EXIT false-triggers it.)
 **Pipeline for the new objective (staged 2026-07-02 ~20:45):** GPU chain: m4ep50 → ep100 → ep150 → ep200
 (sweep3, lever 1). CPU chain: c30 combo eval → ep75 dev-confirm → **co-adapt dump+retrain** (lever 2 prep:
 `scratchpad/coad_dump.sh` dumps 20-user card+note corpus from the ep75 net UNDER PQ deploy →
