@@ -24,7 +24,11 @@ codebook = one alternating-optimization round, zero bit cost; (3) **m4b8 WKV + i
 +0.0028). The F27 downgrade assumed the 0.1-ep int3-shift tax (+0.0004-7); the epoch lever plausibly shrinks
 that too (F19/F20 never tested shifts beyond 0.1 ep). Est. m4b8@0.75ep+shift3 ≈ +0.0019-0.0024 @ EXACTLY
 352 b. Run = RWKV_QAT_PQ=m4b8 + RWKV_QAT_SHIFT_SCOPE=card:int3,note:int3, deploy RWKV_STATE_SHIFT_LEVEL=int3.
-Queued after Andrew's ep sweep (his explicit instruction keeps the GPU); (4) larger-ncent codebooks (m2b9+)
+**F28 QUEUED** (detached PID 17956, `run_m4s3_chained.cmd` polls ep200's DONE; config `qat_pq_m4s3.toml`,
+0.75 ep, out `qat_pq_m4s3_*.pth`, log `qat_qat_pq_m4s3.log`; eval env adds `RWKV_STATE_SHIFT_LEVEL=int3`);
+(3b) **H=4/K=8 geometry — considered and REJECTED (Andrew 2026-07-02 ~23:00):** halves the RAW state but NOT
+the rank-1 payload (2·d_model = 64 factor values either way; PQ index count would double), needs a from-
+scratch champion, benefit (2× DOF fraction under rank-1) speculative. Not pursued; (4) larger-ncent codebooks (m2b9+)
 are OVER budget (360 b) — skip. Schemes must fit ≤352 b; judged only by VAL log-loss, robust per-user.
 **Progress (21:50):** co-adapted codebook BUILT (`pq_cb_m2b8_coad.txt`, 120k dirs/role dumped from the ep75
 net under PQ deploy). Cheap diagnostic queued before committing GPU: ep75 weights deployed with the coad
