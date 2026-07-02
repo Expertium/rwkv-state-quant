@@ -16,9 +16,12 @@ WKV" framing is superseded, but its fixed-net NEGATIVE result (below) still hold
 **New goal: MINIMIZE LOG-LOSS at the 352 b/card state budget.** The locked format = rank-1 PQ (m2b8) WKV
 ~96 b + int4 token-shifts 256 b. Current best at budget: `e75_pq` **+0.0021 imm / +0.0012 ahead** (0.75-ep
 QAT). Quality levers, ranked: (1) **more epochs** — monotone so far, 1.0/1.5/2.0 sweep already queued (F25c);
-(2) **codebook co-adaptation** — retrain the m2b8 codebook on the QAT net's OWN state directions (current
-codebook is champion-trained; after ≥0.75 ep the state distribution has shifted) → re-QAT with the new
-codebook = one alternating-optimization round, zero bit cost; (3) **m4b8 WKV + int3 shifts = exactly 352 b**
+(2) **codebook co-adaptation — DEAD (PTQ diagnostic, 22:53):** retraining the m2b8 codebook on the ep75
+net's OWN deploy-time directions and swapping it in WITHOUT retraining made things WORSE, not better:
+`e75coad` **+0.0027/+0.0016** vs e75_pq +0.0021/+0.0012 (+0.0006/+0.0004 regression). Read: after 0.75 ep of
+QAT the weights sit in a self-consistent equilibrium WITH the fixed champion-trained codebook — consistency
+dominates codebook-fit. An alternating re-QAT round would start from a worse point and at best converge back
+to a similar equilibrium; no GPU slot. (Codebook `pq_cb_m2b8_coad.txt` + `coad_dump.sh` kept for reference.); (3) **m4b8 WKV + int3 shifts = exactly 352 b**
 — **REVIVED by the m4ep50 readout (22:28): m4b8×0.5ep = +0.0019/+0.0011, BEATS e75_pq with less training**
 (m4b8 is ~0.0009 ahead of m2b8 at every equal-epoch point: 0.3ep +0.0024 vs +0.0031; 0.5ep +0.0019 vs
 +0.0028). The F27 downgrade assumed the 0.1-ep int3-shift tax (+0.0004-7); the epoch lever plausibly shrinks
@@ -34,8 +37,9 @@ are OVER budget (360 b) — skip. Schemes must fit ≤352 b; judged only by VAL 
 net under PQ deploy). Cheap diagnostic queued before committing GPU: ep75 weights deployed with the coad
 codebook, NO retraining (tag `e75coad`, 1 pass) — bounds what the co-adapt re-QAT can gain (consistency vs
 codebook-fit). CPU chain: m4ep50 eval (m4b8 epoch-scaling question) → coad-PTQ diagnostic. GPU: ep100
-(started 21:43) → ep150 → ep200. Data-driven decision point at the ep100 readout: if the epoch trend has
-saturated, truncate sweep3 and give the GPU to the co-adapt re-QAT at the best epoch count instead.
+(started 21:43) → ep150 → ep200. **UPDATE 22:53: diagnostic read out NEGATIVE (see lever 2 above) — the
+co-adapt re-QAT is cancelled; the GPU chain stays ep100 → ep150 → ep200 → F28 as queued.** Remaining live
+levers: epochs (sweep3) and m4b8+int3shift (F28).
 **Pipeline for the new objective (staged 2026-07-02 ~20:45):** GPU chain: m4ep50 → ep100 → ep150 → ep200
 (sweep3, lever 1). CPU chain: c30 combo eval → ep75 dev-confirm → **co-adapt dump+retrain** (lever 2 prep:
 `scratchpad/coad_dump.sh` dumps 20-user card+note corpus from the ep75 net UNDER PQ deploy →
@@ -349,6 +353,7 @@ is identical to the master table's `i4r1`/`i4` rows. `≤256b?` reads off WKV+e 
 | **★★ PQ+QAT 0.75 ep (F25b) — WIN @ ~352 b** | **`e75_pq`** | **~96** | **~352** | **~1056** | **Yes** | **+0.0021/+0.0012 — BOTH PASS, real margin** | +0.0024/+0.0018 | −0.0004/−0.0006 | **★★ THE WIN: beats F15's 512-b champion (+0.0024/+0.0021) on BOTH modes at 69% the size. The "floor ≈ +0.0026" read was wrong — trend broke through. EMA identical. Robustness + dev-confirm next** |
 | PQ+QAT COMBO m4b8 × 0.3 ep (F27) | `c30_pq` | ~160 | ~416 | ~1248 | Yes (but OVER the locked 352 budget) | +0.0024/+0.0013 | +0.0025/+0.0017 | −0.0001/−0.0004 | passes gate; stacking works at equal ep (vs m2b8@0.3 +0.0031) but e75_pq is BETTER at 64 fewer bits ⇒ lever 3 (m4b8+shift3@352) unlikely — int3-shift tax ~+0.0004-7 would land ~+0.0028. EMA identical |
 | **PQ+QAT m4b8 × 0.5 ep (F27b)** | `m450_pq` | ~160 | ~416 | ~1248 | OVER budget | **+0.0019/+0.0011 — beats e75_pq at fewer epochs** | +0.0026/+0.0020 | −0.0006/−0.0009 | **m4b8 stays ~0.0009 ahead of m2b8 at equal ep ⇒ lever 3 REVIVED: m4b8+int3shifts@352 b est. +0.0019-0.0024 (queued after Andrew's ep sweep)** |
+| co-adapt codebook PTQ diagnostic (no retrain) | `e75coad` | ~96 | ~352 | ~1056 | Yes | **+0.0027/+0.0016 — WORSE than e75_pq** | (e75 weights, +0.0024/+0.0018) | codebook-swap cost +0.0006/+0.0004 vs m2b8 cb | ✗ **lever 2 (co-adaptation) DEAD**: ep75 weights are in equilibrium WITH the champion-trained m2b8 codebook; a codebook refit to the net's own directions hurts without retraining, so an alternating re-QAT round has no headroom. No GPU slot |
 
 ## ★ THE ≤256-BIT NEGATIVE RESULT (fixed net; rigorous, each step measured — F10)
 1. **rank-1 insufficient** — perfect unquantized rank-1 = +0.0028 imm > gate (F3, `r1fp`); the 2nd singular
