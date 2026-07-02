@@ -151,6 +151,10 @@ That's `16 + 16 + 1 = 33` numbers instead of 256, before any quantization. (In p
 `√σ` into each side — `uf = u·√σ`, `vf = v·√σ`, `A ≈ uf·vfᵀ` — so both stored factors carry equal
 magnitude, which quantizes more gracefully. And it finds `u` by power iteration, per the Interlude.)
 
+Does throwing away 24% of the energy hurt? By matrix-distance standards it's terrible (49% Frobenius
+error on the state above!). By *log-loss* standards — after the network is trained to expect it (QAT
+section) — it costs almost nothing. Which is why the project measures only log-loss.
+
 **Hands-on (PyTorch).** A rank-1 matrix *is* an outer product — build one and count what you stored:
 
 ```python
@@ -195,12 +199,8 @@ print(W)
 
 Storage: `3×2 + 3×2 = 12` numbers. Note that at 3×3 that's *more* than the 9 you started with —
 low-rank only pays once the matrix is big relative to the rank: rank-`r` factors of a `K×K` matrix
-cost `2·K·r` values vs `K²`. For our 16×16 heads, rank-1 = 32 vs 256 (8×) and rank-2 = 64 vs 256 (4×);
+cost `2·K·r` values vs `K²`. For our 16×16 matrices, rank-1 = 32 vs 256 (8×) and rank-2 = 64 vs 256 (4×);
 for a 3×3, rank 2 is already not worth it.
-
-Does throwing away 24% of the energy hurt? By matrix-distance standards it's terrible (49% Frobenius
-error on the state above!). By *log-loss* standards — after the network is trained to expect it (QAT
-section) — it costs almost nothing. Which is why the project measures only log-loss.
 
 ---
 
