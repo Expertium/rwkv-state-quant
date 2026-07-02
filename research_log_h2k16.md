@@ -19,8 +19,9 @@ QAT). Quality levers, ranked: (1) **more epochs** — monotone so far, 1.0/1.5/2
 (2) **codebook co-adaptation** — retrain the m2b8 codebook on the QAT net's OWN state directions (current
 codebook is champion-trained; after ≥0.75 ep the state distribution has shifted) → re-QAT with the new
 codebook = one alternating-optimization round, zero bit cost; (3) **m4b8 WKV + int3 shifts = exactly 352 b**
-— trades shift bits for a 2×-finer codebook (m4b8 cuts drift ~40%; int3 shifts cost ~+0.0004-7 imm at 0.1 ep,
-unexplored at high ep — the in-flight c30/m4ep50 readouts inform this); (4) larger-ncent codebooks (m2b9+)
+— DOWNGRADED by the F27 readout: c30 (m4b8×0.3ep, 416 b) = +0.0024/+0.0013, already behind e75_pq at more
+bits; adding the int3-shift tax (~+0.0004-7) lands ~+0.0028 ⇒ pursue only if m4ep50 shows m4b8 scaling much
+better with epochs; (4) larger-ncent codebooks (m2b9+)
 are OVER budget (360 b) — skip. Schemes must fit ≤352 b; judged only by VAL log-loss, robust per-user.
 **Pipeline for the new objective (staged 2026-07-02 ~20:45):** GPU chain: m4ep50 → ep100 → ep150 → ep200
 (sweep3, lever 1). CPU chain: c30 combo eval → ep75 dev-confirm → **co-adapt dump+retrain** (lever 2 prep:
@@ -332,6 +333,7 @@ is identical to the master table's `i4r1`/`i4` rows. `≤256b?` reads off WKV+e 
 | PQ+QAT TRUE WD=0 (wd0fix, post-bugfix) | `wdf_pq`/`wdfe_pq` | ~96 | ~352 | ~1056 | Yes | +0.0042/+0.0038 · ema +0.0042/+0.0037 | **+0.0045/+0.0055 — WORSE** | −0.0003/−0.0017 | ✗ WD lever DEAD: champion sits at the WD=0.01 equilibrium; removing WD drifts AWAY. Keep WD=0.01 |
 | **PQ+QAT 0.5 ep (F25b)** | `e50_pq` | ~96 | **~352** | ~1056 | **Yes** | **+0.0028/+0.0018** | +0.0031/+0.0031 | −0.0003/−0.0013 | ahead PASSES big; imm +0.0003 over. Trend SLOWING (−0.0003/+0.2ep vs −0.0007/+0.1ep) → m2b8 floor ≈ +0.0026±. EMA identical. ep75 may graze gate; F27 combo = main hope |
 | **★★ PQ+QAT 0.75 ep (F25b) — WIN @ ~352 b** | **`e75_pq`** | **~96** | **~352** | **~1056** | **Yes** | **+0.0021/+0.0012 — BOTH PASS, real margin** | +0.0024/+0.0018 | −0.0004/−0.0006 | **★★ THE WIN: beats F15's 512-b champion (+0.0024/+0.0021) on BOTH modes at 69% the size. The "floor ≈ +0.0026" read was wrong — trend broke through. EMA identical. Robustness + dev-confirm next** |
+| PQ+QAT COMBO m4b8 × 0.3 ep (F27) | `c30_pq` | ~160 | ~416 | ~1248 | Yes (but OVER the locked 352 budget) | +0.0024/+0.0013 | +0.0025/+0.0017 | −0.0001/−0.0004 | passes gate; stacking works at equal ep (vs m2b8@0.3 +0.0031) but e75_pq is BETTER at 64 fewer bits ⇒ lever 3 (m4b8+shift3@352) unlikely — int3-shift tax ~+0.0004-7 would land ~+0.0028. EMA identical |
 
 ## ★ THE ≤256-BIT NEGATIVE RESULT (fixed net; rigorous, each step measured — F10)
 1. **rank-1 insufficient** — perfect unquantized rank-1 = +0.0028 imm > gate (F3, `r1fp`); the 2nd singular
