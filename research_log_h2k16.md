@@ -53,8 +53,14 @@ use `DONE_EXIT_[0-9]` — a status line echoing the *word* DONE_EXIT false-trigg
 (or earlier if sweep3 shows saturation — then truncate it). Lever 3 (m4b8+int3shift @352 b) decision awaits
 the c30/m4ep50 readouts.
 
-## ★ CURRENT STATUS (2026-07-02)
-- **★★★ NEW WIN @ ~352 b/card (2026-07-02 evening): rank-1 PQ (m2b8) + QAT 0.75 ep** — VAL **+0.0021 imm /
+## ★ CURRENT STATUS (2026-07-03)
+- **★★★ CHAMPION @ ~352 b/card is now `e100_pq` (1.0-ep QAT, 2026-07-03 01:35): VAL +0.0016 imm / +0.0005
+  ahead** — the epoch lever kept paying past 0.75 ep (e75_pq +0.0021/+0.0012). Robustness PASS, better than
+  e75_pq on every aggregate (imm mean/med/nbad 0.0016/0.0011/108 vs 0.0021/0.0014/131; ahead
+  0.0005/0.0008/108 vs 0.0012/0.0012/130; Q4-largest imm +0.0019). Weights `reference/qat_pq_ep100.safetensors`
+  (raw, step 3351). ep150/ep200 in flight to find the turn-around; dev-confirm planned for the FINAL sweep pick
+  (e75 dev-confirm already showed val≈dev for this recipe family).
+- **Prior win (2026-07-02 evening): rank-1 PQ (m2b8) + QAT 0.75 ep** — VAL **+0.0021 imm /
   +0.0012 ahead**, both ≤ +0.0025 with real margin; **beats the F15 512-b champion (+0.0024/+0.0021) on BOTH
   modes at 69% of the size.** Card = WKV PQ ~96 b + shifts int4 256 b ≈ 352 b; note ≈ 1056 b. Recipe: F22 +
   EPOCHS=0.75 (LR 1e-3, WD 0.01, from champion, fixed champion-trained m2b8 codebook; weights
@@ -360,6 +366,7 @@ is identical to the master table's `i4r1`/`i4` rows. `≤256b?` reads off WKV+e 
 | PQ+QAT COMBO m4b8 × 0.3 ep (F27) | `c30_pq` | ~160 | ~416 | ~1248 | Yes (but OVER the locked 352 budget) | +0.0024/+0.0013 | +0.0025/+0.0017 | −0.0001/−0.0004 | passes gate; stacking works at equal ep (vs m2b8@0.3 +0.0031) but e75_pq is BETTER at 64 fewer bits ⇒ lever 3 (m4b8+shift3@352) unlikely — int3-shift tax ~+0.0004-7 would land ~+0.0028. EMA identical |
 | **PQ+QAT m4b8 × 0.5 ep (F27b)** | `m450_pq` | ~160 | ~416 | ~1248 | OVER budget | **+0.0019/+0.0011 — beats e75_pq at fewer epochs** | +0.0026/+0.0020 | −0.0006/−0.0009 | **m4b8 stays ~0.0009 ahead of m2b8 at equal ep ⇒ lever 3 REVIVED: m4b8+int3shifts@352 b est. +0.0019-0.0024 (queued after Andrew's ep sweep)** |
 | co-adapt codebook PTQ diagnostic (no retrain) | `e75coad` | ~96 | ~352 | ~1056 | Yes | **+0.0027/+0.0016 — WORSE than e75_pq** | (e75 weights, +0.0024/+0.0018) | codebook-swap cost +0.0006/+0.0004 vs m2b8 cb | ✗ **lever 2 (co-adaptation) DEAD**: ep75 weights are in equilibrium WITH the champion-trained m2b8 codebook; a codebook refit to the net's own directions hurts without retraining, so an alternating re-QAT round has no headroom. No GPU slot |
+| **★★ PQ+QAT 1.0 ep (F25c sweep3) — NEW BEST @ ~352 b** | **`e100_pq`** | **~96** | **~352** | **~1056** | **Yes** | **+0.0016/+0.0005 — both pass with 2-4× margin** | +0.0018/+0.0010 | −0.0002/−0.0005 | **★★ epoch trend ALIVE at 1.0 ep (−0.0005/−0.0007 vs e75_pq). Robustness PASS, better everywhere: imm mean/med/nbad 0.0016/0.0011/108 (e75: 0.0021/0.0014/131), ahead 0.0005/0.0008/108 (e75: 0.0012/0.0012/130), Q4 imm +0.0019, same hard worst-users (6652/6787/6994). ep150/ep200 will show the turn-around point** |
 
 ## ★ THE ≤256-BIT NEGATIVE RESULT (fixed net; rigorous, each step measured — F10)
 1. **rank-1 insufficient** — perfect unquantized rank-1 = +0.0028 imm > gate (F3, `r1fp`); the 2nd singular
