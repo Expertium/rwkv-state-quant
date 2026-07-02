@@ -1,0 +1,28 @@
+# ---- big data / regenerated artifacts (tens of GB) — NOT in git ----
+reference_big/
+preds/
+preds_baseline_backup/
+excluded36/
+
+# eval traces kept locally for quick checks (weight-independent inputs, ~160 MB)
+reference/trace_user_*.safetensors
+reference/trace_user_*.json
+# stale prediction outputs from old-phase quick checks (regenerated scratch)
+reference/rust_pred_*.json
+reference/python_pred_*.json
+
+# build artifacts
+engine/target/
+gpu_train/build/
+**/__pycache__/
+*.pyd
+
+# training checkpoints (~190 MB; the winning weights are versioned as reference/*.safetensors instead)
+gpu_train/reference/*.pth
+
+# scratch data dumps + transient logs (scripts and codebooks in scratchpad/ ARE tracked)
+scratchpad/corpus/
+scratchpad/corpus_coad/
+scratchpad/states.txt
+scratchpad/*.log
+scratchpad_eval*.log

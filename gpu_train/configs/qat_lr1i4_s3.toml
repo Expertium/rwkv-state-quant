@@ -1,0 +1,38 @@
+# Rank-1 int4 WKV + int3 token-shift QAT (448 b/card: WKV 256 + shifts 192). Warm-start champion
+# h2k16d_904, best F16 recipe (peak LR 1e-3, 0.1 ep). WKV via fused rank-1 int4 kernel; shifts fake-quant
+# at int3 in the mixer forwards (RWKV_QAT_SHIFT_SCOPE). Goal: teach int3-shift robustness so the +0.0007
+# shift-int3 PTQ cost (F18) is trained away -> deploy WKV int4 + shift int3 = 448 b passes the gate (sub-512).
+TRAIN_USERS_START = 1000
+TRAIN_USERS_END = 2499
+VALIDATE_USERS_START = 101
+VALIDATE_USERS_END = 110
+
+TRAIN_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/train_db_sc8k_1500"
+TRAIN_DATASET_LMDB_SIZE = 80_000_000_000
+VALIDATE_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/test_db"
+VALIDATE_DATASET_LMDB_SIZE = 8_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 2_000_000_000
+
+NUM_FETCH_PROCESSES = 6
+MAX_TRAIN_GLOBAL_LEN = 66000
+
+TRAIN_MODE = "D"
+STEP_OFFSET = 1
+WARMUP_STEPS = 0
+EPOCHS = 0.1
+VALIDATE_EVERY = 100000
+PEAK_LR = 1e-3
+
+LOAD_MODEL = true
+LOAD_MODEL_FOLDER = "reference"
+LOAD_MODEL_NAME = "h2k16d_904"
+SAVE_MODEL_FOLDER = "reference"
+SAVE_MODEL_PREFIX = "qat_lr1i4_s3"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+USE_WANDB = false
+WANDB_PROJECT_NAME = "rwkv"
+WANDB_RESUME = false
+WANDB_RESUME_ID = ""

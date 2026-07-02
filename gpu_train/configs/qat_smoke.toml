@@ -1,0 +1,36 @@
+# SMOKE test for the fused QAT kernel: tiny slice, self-terminating (~15-20 steps). NOT a research run.
+# Same recipe as qat_fmi2_decay but 100 users / few steps / no validation. Fused-vs-unfused parity + speed.
+TRAIN_USERS_START = 1000
+TRAIN_USERS_END = 1099
+VALIDATE_USERS_START = 101
+VALIDATE_USERS_END = 110
+
+TRAIN_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/train_db_sc8k_1500"
+TRAIN_DATASET_LMDB_SIZE = 80_000_000_000
+VALIDATE_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/test_db"
+VALIDATE_DATASET_LMDB_SIZE = 8_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 2_000_000_000
+
+NUM_FETCH_PROCESSES = 6
+MAX_TRAIN_GLOBAL_LEN = 66000
+
+TRAIN_MODE = "D"
+STEP_OFFSET = 1
+WARMUP_STEPS = 0
+EPOCHS = 0.08
+VALIDATE_EVERY = 100000
+PEAK_LR = 1e-3
+
+LOAD_MODEL = true
+LOAD_MODEL_FOLDER = "reference"
+LOAD_MODEL_NAME = "h2k16ws_3351"
+SAVE_MODEL_FOLDER = "reference"
+SAVE_MODEL_PREFIX = "qat_smoke_scratch"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+USE_WANDB = false
+WANDB_PROJECT_NAME = "rwkv"
+WANDB_RESUME = false
+WANDB_RESUME_ID = ""
