@@ -151,6 +151,53 @@ That's `16 + 16 + 1 = 33` numbers instead of 256, before any quantization. (In p
 `√σ` into each side — `uf = u·√σ`, `vf = v·√σ`, `A ≈ uf·vfᵀ` — so both stored factors carry equal
 magnitude, which quantizes more gracefully. And it finds `u` by power iteration, per the Interlude.)
 
+**Hands-on (PyTorch).** A rank-1 matrix *is* an outer product — build one and count what you stored:
+
+```python
+import torch
+U = torch.tensor([[1.],
+                  [2.],
+                  [3.]])
+
+V = torch.tensor([[10.],
+                  [20.],
+                  [30.]])
+
+W = U @ V.T
+print(W)
+# tensor([[10., 20., 30.],
+#         [20., 40., 60.],
+#         [30., 60., 90.]])
+```
+
+A 3×3 matrix (9 values) decomposes into just **6** stored numbers (U's 3 + V's 3) — and every row of
+`W` is a multiple of `Vᵀ`, every column a multiple of `U`. That perfect redundancy is what "rank 1"
+means.
+
+**Rank 2 = two columns per factor.** Give `U` and `V` a second column and the product becomes the
+*sum of two* outer products (exactly the SVD's sum form from the Interlude):
+
+```python
+U = torch.tensor([[1.,  0.],
+                  [2.,  1.],
+                  [3., -1.]])
+
+V = torch.tensor([[10., 1.],
+                  [20., 2.],
+                  [30., 3.]])
+
+W = U @ V.T          # = U[:,0] ⊗ V[:,0]  +  U[:,1] ⊗ V[:,1]
+print(W)
+# tensor([[10., 20., 30.],
+#         [21., 42., 63.],
+#         [29., 58., 87.]])
+```
+
+Storage: `3×2 + 3×2 = 12` numbers. Note that at 3×3 that's *more* than the 9 you started with —
+low-rank only pays once the matrix is big relative to the rank: rank-`r` factors of a `K×K` matrix
+cost `2·K·r` values vs `K²`. For our 16×16 heads, rank-1 = 32 vs 256 (8×) and rank-2 = 64 vs 256 (4×);
+for a 3×3, rank 2 is already not worth it.
+
 Does throwing away 24% of the energy hurt? By matrix-distance standards it's terrible (49% Frobenius
 error on the state above!). By *log-loss* standards — after the network is trained to expect it (QAT
 section) — it costs almost nothing. Which is why the project measures only log-loss.
