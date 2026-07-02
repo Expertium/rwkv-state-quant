@@ -38,8 +38,9 @@ the c30/m4ep50 readouts.
   `reference/qat_pq_ep75.safetensors`). Two levers found: **epochs** (monotone 0.05→0.75, drift keeps falling —
   longer QAT lets the base recover under the PQ regime) and **codebook fineness** (m4b8 cuts drift ~40%/ep).
   Dead levers (all measured): LR, shorter tail, clip, WD (champion sits at the WD=0.01 equilibrium), EMA ~nil.
-  **Caveat:** ep=0.75 was selected on VAL (like F15's recipe) → dev-confirm pending; F27 combo (m4b8×0.3ep,
-  416 b) + m4ep50 margin runs still in flight for potentially even better points.
+  **DEV-CONFIRMED (was the last caveat): +0.0021 imm / +0.0014 ahead on the 400 DEV users** — matches VAL
+  (+0.0021/+0.0012); the recipe generalizes, not a val fluke. Win fully validated: gate ✓, robustness ✓,
+  dev ✓. F27 combo read out (+0.0024/+0.0013 @416 b — behind the champion); m4ep50 still in flight.
   **Robustness (per_user.py, 400 VAL): PASS — MORE robust than F15.** Head-to-head vs qi4r1(F15,512b):
   imm mean/median/nbad **+0.0021/+0.0014/131** vs +0.0024/+0.0020/155; ahead **+0.0012/+0.0012/130** vs
   +0.0021/+0.0018/150; Q4-largest imm **+0.0023** vs +0.0028 (no power-user runaway). Worst users same
