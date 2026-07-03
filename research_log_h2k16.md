@@ -51,6 +51,23 @@ already clear the gate; (b) GPU QAT `s3e150` = e150 recipe + `RWKV_QAT_SHIFT_SCO
 1.5 ep (config `qat_pq_s3e150.toml`, launch after the kernel-port parity check); (c) if passed:
 robustness + dev-confirm + handoff update. Backups if int3 shifts resist: m2b6 codebook (272 b),
 PQ-encode the shift vectors themselves (~176 b, needs new engine+QAT paths).
+**★ STANDING ORDER (Andrew 2026-07-04 ~02:20, off to sleep): if 288 b succeeds, KEEP LOWERING BITS at the
+same gate.** Overnight ladder queued as self-driving GPU-serial chains (trainings run unconditionally —
+they're cheap on the fast kernel; the eval scores decide what's a win):
+- **Rung 1, 288 b** = m2b8 96 + int3 shifts 192: `s3e150` TRAINING (started 02:19, ~5025 steps) → chain
+  evals @288. LMDB stall fixed first (see below).
+- **Rung 2, 272 b** = m2b6 (64-centroid: 4×(12+8)=80 b WKV) + int3 shifts: `q272` chained on s3e150's GPU.
+- **Rung 3, 224 b** = m2b8 + INT2 (ternary) shifts 128 b: `q224` chained on q272. Tests whether shift-QAT
+  × 1.5 ep rescues what was PTQ-catastrophic (+0.0041, F18) — the epochs lever has revived costs before.
+- Deeper (if 224 passes / morning work): m2b6+int2 = 208 b; **PQ-encode the shift vectors** (~2×40 b →
+  card ~176 b, new engine+QAT paths — the deep lever).
+**Ops incident (02:12): `MDB_READERS_FULL`** — LMDB reader tables clogged by stale slots from days of
+tree-kills + 7 dead-parent orphan workers (sibling repo's crashed job). Fixed: `env.reader_check()`
+(cleared 89), killed the orphans (parent PID verified dead), then RENAME-GUARDED lock-file reset of
+train/test DBs (rename succeeds ⇔ no live mapper — doubles as proof the sibling's LIVE jobs don't use
+them; label_filter too). All 3 envs reopen with 1 reader. ⚠ The trainer exits **DONE_EXIT_0 even on this
+crash** ("Killed processes.") — chains must (and do) guard on the checkpoint file existing, not the exit
+code alone. Sibling's live `data_processing`/`train_bigstack` + FSRS bench (new PIDs 18200 tree) untouched.
 **Speedup port from the parent repo (the other Claude, 2026-07-03):** `rwkv7_cuda.cu` (37× QAT kernel:
 warp-0 power iter + block-parallel PQ search + skip elision, all bit-exact; + zeros→empty grad buffers),
 `rwkv_model.py` (flat-row time-shift gather), `srs_model.py` (PermGather collision-free deterministic
