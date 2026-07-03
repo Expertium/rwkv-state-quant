@@ -61,6 +61,18 @@ they're cheap on the fast kernel; the eval scores decide what's a win):
   × 1.5 ep rescues what was PTQ-catastrophic (+0.0041, F18) — the epochs lever has revived costs before.
 - Deeper (if 224 passes / morning work): m2b6+int2 = 208 b; **PQ-encode the shift vectors** (~2×40 b →
   card ~176 b, new engine+QAT paths — the deep lever).
+**QAT-dedicated parameters (Andrew's idea, 2026-07-04 ~02:30) — surgical grafts, NO fresh retrain needed
+(identity/zero-init = function-preserving, warm-start champion).** Ranked by added capability: (1) learnable
+per-column state scales — REDUNDANT for the WKV path (diagonal conditioning commutes with the WKV update ⇒
+absorbable into W_k/W_v/W_r rows; optimization-geometry-only); (2) ★ **learned orthogonal rotation R inside
+the compression sandwich** (rotate→rank-1+PQ→un-rotate; NOT absorbable since compression is nonlinear;
+SpinQuant showed learned rotations ≫ fixed Hadamard, and our fixed Hadamard was neutral; init I, zero
+per-card bits, 2×16×16 matmuls/compress); (3) ★ **LSQ learned per-channel step sizes for the SHIFT
+quantizer** (shifts are layernorm'd ⇒ stable stats ⇒ global learned scale plausible; also deletes the 2
+per-card shift scales; attacks exactly the int3/int2-shift wall); (4) **gradient co-training of the
+codebook** (backprop into selected centroids — DIFFERENT from the dead alternating-PTQ co-adapt; kernel
+atomicAdd work). Pick by tonight's failure mode: 224 fails on int2 shifts → build (3); deep PQ rungs fail
+on codebook snap → build (2) (+4). All need matching Rust engine paths before scoring (train==deploy).
 **Ops incident (02:12): `MDB_READERS_FULL`** — LMDB reader tables clogged by stale slots from days of
 tree-kills + 7 dead-parent orphan workers (sibling repo's crashed job). Fixed: `env.reader_check()`
 (cleared 89), killed the orphans (parent PID verified dead), then RENAME-GUARDED lock-file reset of
