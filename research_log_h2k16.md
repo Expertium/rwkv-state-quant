@@ -4,6 +4,43 @@ Metric = by-user-mean equalized **log-loss penalty** vs fp32, via `run_eval.sh` 
 head, `ahead` = forgetting-curve head; BOTH matter). Lower = better. fp32 raw VAL log-loss = **imm 0.2797 /
 ahead 0.3118**. Numbers to 4 decimals; scheme names in `rank-N intM` order. Old H=1/K=32 phase → `research_log.md`.
 
+## ★★★ FINAL RESULT + HANDOFF (run stopped by Andrew 2026-07-03 ~08:45)
+
+**FINAL CHAMPION @ 352 b/card: `e150_pq` = rank-1 PQ (m2b8) WKV + int4 token-shifts + 1.5-epoch QAT.**
+**VAL +0.0010 imm / −0.0003 ahead** — the compressed model BEATS the uncompressed fp32 champion on the
+ahead mode. Robust per-user (imm mean/med/nbad 0.0010/0.0007/69-of-400, Q4-largest +0.0013; one benign
+single-user ahead outlier, 6951 +0.0246). Dev-confirm: see CURRENT STATUS. For scale: the 512-b F15
+champion was +0.0024/+0.0021; the original PTQ starting point at this size was +0.0046/+0.0040.
+
+**The LOCKED quantization recipe (do not change — improve log-loss around it):**
+- Per WKV 16×16 head-matrix: rank-1 factors (power-iteration top singular vector, split-√σ, sign-canon),
+  each 16-dim factor PQ-encoded with the **fixed global codebook `scratchpad/pq_cb_m2b8.txt`** (2 sub-vectors
+  of dim 8, 256 centroids → 16 b + norm scale per direction) ≈ **96 b/card layer**; token-shifts **int4**
+  (2×32 values ≈ 256 b) → **card ≈ 352 b, note (3 layers) ≈ 1056 b**.
+- **Deploy env** (Rust engine, both fast+candle paths): `RWKV_STATE_LOWRANK_SCOPE=card:1:int4,note:1:int4
+  RWKV_LOWRANK_PQ=scratchpad/pq_cb_m2b8.txt RWKV_QUANT_SHIFTS=1 RWKV_LOWRANK_PERCOL=1`.
+- **Champion weights: `reference/qat_pq_ep150.safetensors`** (raw ckpt step 5026; EMA variant ±0.0001, ignore).
+- **QAT recipe that produced it** (config `gpu_train/configs/qat_pq_ep150.toml`): fine-tune the fp32 champion
+  `h2k16d_904` for **EPOCHS=1.5**, PEAK_LR 1e-3, no warmup, WD 0.01, clip 0.25, train users 1000–2499, with
+  the deploy compression fake-quantized in the forward via the fused CUDA kernel:
+  `RWKV_QAT_LOWRANK_SCOPE=card:1:int4,note:1:int4 RWKV_QAT_PQ=<codebook> RWKV_QAT_FUSED=1` (train==deploy
+  parity 3e-7; shifts not fake-quantized — int4 shift PTQ is ~free and is included in the measured numbers).
+
+**Why it works (the two levers that mattered):** (1) **epochs** — monotone 0.05→1.5 ep, no turn-around seen;
+longer QAT lets the base recover under the PQ regime and compression_cost goes NEGATIVE (−0.0008/−0.0008 at
+1.5 ep: the PQ constraint acts as a regularizer). (2) **codebook fineness** (m4b8 ~0.0009 better at equal
+epochs, but int4-shift variant is over budget). Dead levers (all measured): LR, tail length, grad clip, WD
+(champion sits at the WD=0.01 equilibrium), EMA, codebook co-adaptation (weights equilibrate to the codebook
+they trained with — refit hurts), H4K8 geometry (rejected: same rank-1 payload).
+
+**Epoch ladder (VAL, m2b8 @352 b):** 0.05 ep +0.0050/+0.0040 · 0.1 +0.0043/+0.0037 · 0.2 +0.0038/+0.0031 ·
+0.3 +0.0031/+0.0020 · 0.5 +0.0028/+0.0018 · 0.75 +0.0021/+0.0012 · 1.0 +0.0016/+0.0005 · **1.5 +0.0010/−0.0003**.
+
+**Cancelled in-flight at the stop order (both resumable, configs + chained cmds committed):** ep200 (2.0 ep,
+killed at ~48% — the trend was STILL paying at 1.5, so 2.0+ ep is the most promising open lever); F28
+`qat_pq_m4s3` (m4b8 WKV + int3 shifts = exactly 352 b, est. +0.0019–0.0024 — never trained). Also open:
+whether the 6951-type single-user ahead outlier grows with epochs.
+
 **★ OBJECTIVE (Andrew 2026-07-01, REVISED): minimize the FULL per-card state payload** — everything persisted
 to disk for a card: WKV factors + token-shifts + any extra terms (error-feedback `e`, codebook indices, scales)
 — **subject to the log-loss gate ≤ +0.0025 in BOTH modes on VAL, robust per-user.** Reference (full card, incl.
@@ -53,14 +90,14 @@ use `DONE_EXIT_[0-9]` — a status line echoing the *word* DONE_EXIT false-trigg
 (or earlier if sweep3 shows saturation — then truncate it). Lever 3 (m4b8+int3shift @352 b) decision awaits
 the c30/m4ep50 readouts.
 
-## ★ CURRENT STATUS (2026-07-03)
-- **★★★ CHAMPION @ ~352 b/card is now `e150_pq` (1.5-ep QAT, 2026-07-03 06:23): VAL +0.0010 imm / −0.0003
+## ★ CURRENT STATUS (2026-07-03) — RUN FINALIZED (see HANDOFF section at top)
+- **★★★ FINAL CHAMPION @ ~352 b/card = `e150_pq` (1.5-ep QAT, 2026-07-03 06:23): VAL +0.0010 imm / −0.0003
   ahead — the compressed model BEATS the fp32 champion on ahead.** Epoch trend still monotone through 0.05 →
   1.5 ep; comp_cost −0.0008/−0.0008 (PQ = regularizer). Robustness PASS (imm mean/med/nbad 0.0010/0.0007/69;
   ahead −0.0003/+0.0002/76; Q4 imm +0.0013; watch-item: single-user ahead outlier 6951 +0.0246). Weights
   `reference/qat_pq_ep150.safetensors` (raw, step 5026). Prior points: e100_pq +0.0016/+0.0005 (robustness
-  PASS, nbad 108), e75_pq +0.0021/+0.0012. ep200 in flight to find the turn-around; dev-confirm planned for
-  the FINAL sweep pick (e75 dev-confirm already showed val≈dev for this recipe family).
+  PASS, nbad 108), e75_pq +0.0021/+0.0012. Andrew stopped the run 2026-07-03 ~08:45 (ep200 killed at ~48%,
+  F28 cancelled before start); dev-confirm of e150_pq launched at stop time — result below.
 - **Prior win (2026-07-02 evening): rank-1 PQ (m2b8) + QAT 0.75 ep** — VAL **+0.0021 imm /
   +0.0012 ahead**, both ≤ +0.0025 with real margin; **beats the F15 512-b champion (+0.0024/+0.0021) on BOTH
   modes at 69% of the size.** Card = WKV PQ ~96 b + shifts int4 256 b ≈ 352 b; note ≈ 1056 b. Recipe: F22 +
