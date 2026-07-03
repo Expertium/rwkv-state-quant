@@ -1,4 +1,4 @@
-# How the WKV state gets squeezed from 2 KB to 352 bits
+# How the WKV state gets squeezed from 2.25 KB to 352 bits
 ### The five levels of compression used in this project, for a STEM reader who hasn't done quantization
 
 This note explains, from the ground up, how this project compresses an RWKV-7 recurrent "WKV state"
@@ -13,12 +13,14 @@ labelled "toy".
 ## 0. The problem in one paragraph
 
 The network keeps a little memory matrix for **every flashcard** (and every note). For one card, in
-one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit floats, plus two small
-"token-shift" vectors. Raw size: `2 × 16 × 16 × 32 bits ≈ 16 kbit ≈ 2 KB` per card. A power user has
-~1,000,000 cards, so raw states are gigabytes. The final scheme stores each card in **352 bits** —
-a ~47× reduction — while predicting recall *essentially as well as the uncompressed model* (log-loss
-degradation +0.0021/+0.0012, within the ≤ +0.0025 gate). The rest of this note climbs
-the five levels that get there.
+one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit floats, plus two 32-number
+"token-shift" vectors (explained in their own section below). Raw size, counted exactly:
+`(2×16×16 + 2×32) × 32 bits = 18,432 bits = 2.25 KB` per card. A power user has ~1,000,000 cards, so
+raw states are gigabytes. The final scheme stores each card in **352 bits** — a **52×** reduction —
+while predicting recall *essentially as well as the uncompressed model*: log-loss degradation
+**+0.0010** on the immediate-recall head, **−0.0003** on the forgetting-curve head (yes, negative —
+on that head the compressed model predicts marginally *better* than the uncompressed one; the QAT
+section explains how that is possible). The rest of this note climbs the five levels that get there.
 
 ---
 
@@ -43,7 +45,8 @@ To quantize a vector `x` symmetrically to "int-N":
   is coarse near zero.
 
 Cost: **N bits per number + one scale for the whole vector.** In the final scheme, Level 1 is exactly
-how the two token-shift vectors are stored (int4: 64 values × 4 bits = 256 bits).
+how the two token-shift vectors are stored (int4: 64 values × 4 bits = 256 bits, plus one scale per
+vector — what those vectors *are* gets its own section after Level 4).
 
 > Pedantic-but-critical detail: ties round "half away from zero" everywhere (Rust `f64::round`, CUDA
 > `roundf`), because training and deployment must do the *bit-identical* operation — see the QAT section.
@@ -218,6 +221,38 @@ magnitude is one cheap scalar; the direction is what's expensive. Level 5 attack
 
 ---
 
+## The other piece of the state: token-shift vectors
+
+The WKV matrices are only part of what must be persisted per card. The other part — 256 of the 352
+bits! — is the **token-shift state**, so it deserves an actual explanation.
+
+**What they are.** An RWKV block does not look only at the current step's input. Each block computes
+its internal projections from a learned per-channel *blend of the current activation and the previous
+step's activation* — roughly `x_used = lerp(x_current, x_previous, μ)` with a learned mixing vector
+`μ`. That one-step lookback is the "token shift". It gives every block a cheap short-range memory
+(features spanning two consecutive reviews) without spending the long-term WKV memory on them.
+
+**Why they must be stored.** The blend needs `x_previous`. When a card comes back for its next review
+— possibly months later — the recurrence resumes exactly where it left off, so the engine must
+remember *that card's last activation* for every block. Per layer that is two vectors of 32 numbers
+(the model's layer width): one for the time-mix block (the one that owns the WKV matrices) and one
+for the channel-mix block (the feed-forward half). Drop them and the first review after loading is
+computed from a wrong blend — the error then propagates through the whole rest of the history via
+the recurrence.
+
+**How they're stored.** They are plain 1-D vectors — no matrix structure, so there is nothing for
+SVD/low-rank/PQ to exploit. They get the Level 1–2 treatment: **int4 codes with one absmax scale per
+vector**. Counted exactly: 2 vectors × 32 values × 4 bits = **256 bits** of codes, plus 2 per-vector
+scales.
+
+**Why int4 and not fewer.** This was measured, and it's the sharpest empirical fact about the shifts:
+they are *more* quantization-sensitive than the WKV matrices. Taking the shifts to int3 costs ~+0.0004
+imm log-loss even with QAT; int2 is catastrophic (+0.0041/+0.0024 on top of the scheme). The sub-512-bit
+exploration concluded "token-shifts are the binding wall": the WKV side could be squeezed all the way
+down to PQ catalog numbers, but the shifts stay at int4.
+
+---
+
 ## Level 5 — Product Quantization: a direction becomes a catalog number
 
 ### 5a. The idea, with no math
@@ -240,7 +275,8 @@ thin — these are not random. So:
 > the same fixed catalog for every user and every card. Per card, store only **which catalog entry is
 > closest** — a small integer — plus the norm.
 
-A direction that cost 64 bits at Level 4 becomes a ~16-bit catalog reference.
+A direction that cost 64 bits at Level 4 becomes a 16-bit catalog reference (the one-scalar norm is
+paid identically at both levels, so the comparison is clean: 64 → 16 bits per direction).
 
 ### 5b. Why "product": split the vector, multiply the options
 
@@ -312,17 +348,27 @@ flipped (before encoding) so that `u`'s largest-magnitude entry is positive. All
 the same "hemisphere", so no catalog entries are wasted on mirror images — effectively doubling
 resolution for free.
 
-### 5e. The final 352-bit card
+### 5e. The final 352-bit card, counted exactly
 
 | piece | how | bits |
 |---|---|---|
-| 4 WKV directions (u, v × 2 heads) | PQ: 2 indices × 8 bits each | 64 |
-| 4 norms | small scalars (scales) | ~32 |
-| token-shifts (2 × 32 values) | Level 1, int4 | 256 |
-| **card total** | | **≈ 352** |
+| 4 WKV directions (u, v × 2 heads) | PQ: 2 indices × 8 bits each | 4 × 2 × 8 = **64** |
+| 4 direction norms | one int8 scalar each | 4 × 8 = **32** |
+| token-shift codes (2 vectors × 32 values) | Level 1, int4 | 2 × 32 × 4 = **256** |
+| **card total** | | **64 + 32 + 256 = 352** |
 
-(A note stores 3 layers ≈ 1056 bits. The catalog itself: 2 roles × 2 positions × 256 centroids ×
-8 dims ≈ 8K floats, shipped once in the app.)
+A note stores 3 layers = 3 × 352 = **1056 bits**. The catalog itself: 2 roles (u, v — both heads share
+it) × 2 chunk positions × 256 centroids × 8 dims = 8,192 floats = 32 KB as f32, shipped once in the
+app — it costs no per-card bits.
+
+Full disclosure on the scalars, since this table claims to be exact: the two **token-shift scales**
+(one per vector, from Level 1) are the only per-card numbers *not* in the table. The project's
+accounting convention amortizes quantization scales (they are O(1) per object and every scheme in
+every comparison table pays them identically); if you insist on charging literally every per-card
+scalar at int8, the strict total is 352 + 2×8 = **368 bits**. The 4 direction norms *are* charged
+(at 8 bits each) because they are the magnitude payload of the PQ scheme itself. One more honesty
+note: the evaluation engine holds these 6 scalars as floats in RAM at run time — the bit charges
+above are *storage* precision.
 
 ---
 
@@ -380,10 +426,14 @@ Two findings made the 352-bit scheme work:
    robustness. The compression in the QAT forward is verified bit-compatible with the Rust deploy
    path to ~1e-7.
 2. **Train long enough.** With a short fine-tune, PQ passed most of its cost as a drifted base model.
-   Training longer let the base *recover under the compressed regime* — the degradation fell monotonically
-   with fine-tune length, to the point where the PQ-compressed model slightly **beats its own
-   uncompressed weights** (the compression acts as a familiar, trained-for representation, not an
-   injury). Final numbers at 352 b: PTQ +0.0046 → QAT +0.0021/+0.0012.
+   Training longer let the base *recover under the compressed regime* — the degradation fell
+   monotonically with fine-tune length at every point measured (0.05 → 1.5 epochs, never turning
+   around), to the point where the PQ-compressed model **beats its own uncompressed weights** (the
+   compression acts as a familiar, trained-for representation, not an injury — and that is how the
+   final scheme manages a *negative* degradation on the forgetting-curve head: the deployed compressed
+   model ends up marginally better there than the original fp32 champion). Final numbers at 352 b:
+   PTQ +0.0046/+0.0040 → 0.1-epoch QAT +0.0043/+0.0037 → 0.75 ep +0.0021/+0.0012 → **1.5 ep
+   +0.0010/−0.0003** (the deployed recipe; confirmed on the held-out dev split, +0.0009/+0.0003).
 
 ---
 
@@ -414,13 +464,14 @@ Two findings made the 352-bit scheme work:
 
 | scheme | card bits | log-loss degradation (imm / ahead) |
 |---|---|---|
-| raw fp32 | ~18,432 | 0 (reference) |
+| raw fp32 | 18,432 | 0 (reference) |
 | Level 4: rank-1 int4 + QAT | 512 | +0.0024 / +0.0021 |
-| **Level 5: rank-1 PQ + QAT (deployed)** | **≈ 352** | **+0.0021 / +0.0012** |
+| **Level 5: rank-1 PQ + QAT, 1.5 ep (deployed)** | **352** | **+0.0010 / −0.0003** |
 
-Both pass the ≤ +0.0025 gate; the 352-bit scheme is the better *and* smaller one,
-and it is at least as robust per-user (no user gets wrecked; the hardest users are equally hard for
-every scheme).
+Both pass the ≤ +0.0025 gate; the 352-bit scheme is the better *and* smaller one — on the
+forgetting-curve head it edges out the uncompressed reference itself — and it is *more* robust
+per-user than the 512-bit scheme (fewer degraded users, no power-user blow-ups; the hardest users
+are the same hard users under every scheme).
 
 ---
 
@@ -435,6 +486,10 @@ every scheme).
 - **Eckart–Young** — truncated SVD is the *best possible* rank-r approximation (in least squares).
 - **Power iteration** — repeat `u ← normalize(A Aᵀ u)` to get the top direction cheaply.
 - **Low-rank (Level 3)** — store `σ·u·vᵀ` (two directions + magnitude) instead of the full matrix.
+- **Token shift** — every block blends the current activation with the *previous step's*; the two
+  32-value "previous activation" vectors per layer must therefore persist between reviews. Stored
+  int4 + one scale per vector = 256 of the 352 bits; more quant-sensitive than the WKV (int4 is the
+  floor that survives).
 - **Level 4** — low-rank factors, int4-quantized per column: 512 b/card.
 - **PQ / product quantization (Level 5)** — chop a unit direction into chunks; replace each chunk by
   its nearest catalog entry; store the indices + the norm. Combinations multiply: two 256-entry

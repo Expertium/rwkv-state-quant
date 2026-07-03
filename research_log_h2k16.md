@@ -9,8 +9,9 @@ ahead 0.3118**. Numbers to 4 decimals; scheme names in `rank-N intM` order. Old 
 **FINAL CHAMPION @ 352 b/card: `e150_pq` = rank-1 PQ (m2b8) WKV + int4 token-shifts + 1.5-epoch QAT.**
 **VAL +0.0010 imm / −0.0003 ahead** — the compressed model BEATS the uncompressed fp32 champion on the
 ahead mode. Robust per-user (imm mean/med/nbad 0.0010/0.0007/69-of-400, Q4-largest +0.0013; one benign
-single-user ahead outlier, 6951 +0.0246). Dev-confirm: see CURRENT STATUS. For scale: the 512-b F15
-champion was +0.0024/+0.0021; the original PTQ starting point at this size was +0.0046/+0.0040.
+single-user ahead outlier, 6951 +0.0246). **DEV-CONFIRMED (09:17): +0.0009 imm / +0.0003 ahead on the
+400 held-out DEV users — matches VAL; the val-selected epoch count is not a fluke.** For scale: the
+512-b F15 champion was +0.0024/+0.0021; the original PTQ starting point at this size was +0.0046/+0.0040.
 
 **The LOCKED quantization recipe (do not change — improve log-loss around it):**
 - Per WKV 16×16 head-matrix: rank-1 factors (power-iteration top singular vector, split-√σ, sign-canon),
@@ -97,7 +98,8 @@ the c30/m4ep50 readouts.
   ahead −0.0003/+0.0002/76; Q4 imm +0.0013; watch-item: single-user ahead outlier 6951 +0.0246). Weights
   `reference/qat_pq_ep150.safetensors` (raw, step 5026). Prior points: e100_pq +0.0016/+0.0005 (robustness
   PASS, nbad 108), e75_pq +0.0021/+0.0012. Andrew stopped the run 2026-07-03 ~08:45 (ep200 killed at ~48%,
-  F28 cancelled before start); dev-confirm of e150_pq launched at stop time — result below.
+  F28 cancelled before start); dev-confirm of e150_pq completed 09:17: **DEV +0.0009/+0.0003 — matches VAL,
+  recipe generalizes.** Final champion fully validated: gate ✓ (with 2.5–9× margin), robustness ✓, dev ✓.
 - **Prior win (2026-07-02 evening): rank-1 PQ (m2b8) + QAT 0.75 ep** — VAL **+0.0021 imm /
   +0.0012 ahead**, both ≤ +0.0025 with real margin; **beats the F15 512-b champion (+0.0024/+0.0021) on BOTH
   modes at 69% of the size.** Card = WKV PQ ~96 b + shifts int4 256 b ≈ 352 b; note ≈ 1056 b. Recipe: F22 +
