@@ -63,11 +63,12 @@ class RWKV7Config:
     state_lowrank_fqmax: float = float("inf")
     # Shift-QAT: per-step int-N round-trip of the token-shift vectors (inf = off). The QAT analog of the
     # deploy RWKV_QUANT_SHIFTS + RWKV_STATE_SHIFT_LEVEL — matches what the engine persists+quantizes per
-    # review for a compressed stream (the layernorm'd previous-token input). Only used with RWKV_NO_JIT.
+    # review for a compressed stream (the layernorm'd previous-token input). (The sibling ran this with
+    # RWKV_NO_JIT; here it is TorchScript-annotated so the JIT-on path compiles it too.)
     state_shift_qmax: float = float("inf")
 
 
-def fake_quant_shift(x_BTC, qmax):
+def fake_quant_shift(x_BTC: torch.Tensor, qmax: float) -> torch.Tensor:
     """STE per-row symmetric int-N quant of a token-shift tensor (B,T,C), matching the Rust deploy
     `quant_vec_inplace`: scale = max(amax/qmax, 1e-12) per (b,t) vector, q = round(x/scale).clamp(±qmax)*scale.
     forward = quantized shift, backward = identity (the shift is transparent to the gradient)."""
@@ -162,16 +163,26 @@ class RWKV7ChannelMixer(ModuleType):
     @FunctionType
     def forward(self, in_BTC, time_shift_select_BT):
         x_BTC = self.layer_norm(in_BTC)
-        x_shift_BTC = torch.gather(
-            x_BTC,
-            dim=1,
-            index=time_shift_select_BT.unsqueeze(-1).expand(-1, -1, self.d_model),
-        )
+        x_shift_BTC = time_shift_gather(x_BTC, time_shift_select_BT)
         if self.state_shift_qmax != float("inf"):  # shift-QAT: fake-quant the persisted shift (deploy analog)
             x_shift_BTC = fake_quant_shift(x_shift_BTC, self.state_shift_qmax)
         k_BTK = self.W_k(torch.lerp(x_BTC, x_shift_BTC, self.lerp_k))
         o_BTC = self.W_v(torch.square(torch.nn.functional.relu(k_BTK)))
         return in_BTC + self.dropout(o_BTC)
+
+
+def time_shift_gather(x_BTC: torch.Tensor, sel_BT: torch.Tensor) -> torch.Tensor:
+    """torch.gather(x, 1, sel.expand(..,C)) reformulated as a flat ROW index_select.
+
+    Numerically identical forward (same selected values). The win is the backward under
+    torch.use_deterministic_algorithms: gather's backward scatter-adds B*T*C individually
+    keyed elements through the sort-based deterministic path (~20% of the whole training
+    step across the 14 layers), while index_select's backward is a row-wise deterministic
+    index_add -- it sorts only B*T keys and accumulates C-wide rows."""
+    B, T, C = x_BTC.shape
+    offs = torch.arange(B, dtype=torch.long, device=sel_BT.device).unsqueeze(1) * T
+    flat = (sel_BT.long() + offs).view(-1)
+    return torch.index_select(x_BTC.reshape(B * T, C), 0, flat).view(B, T, C)
 
 
 def ortho_init(x, scale):
@@ -349,11 +360,7 @@ class RWKV7TimeMixer(ModuleType):
         H, K = self.H, self.K
 
         x_BTC = self.layer_norm(in_BTC)
-        x_shift_BTC = torch.gather(
-            x_BTC,
-            dim=1,
-            index=time_shift_select_BT.unsqueeze(-1).expand(-1, -1, self.d_model),
-        )
+        x_shift_BTC = time_shift_gather(x_BTC, time_shift_select_BT)
         if self.state_shift_qmax != float("inf"):  # shift-QAT: fake-quant the persisted shift (deploy analog)
             x_shift_BTC = fake_quant_shift(x_shift_BTC, self.state_shift_qmax)
 

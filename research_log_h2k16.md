@@ -42,6 +42,22 @@ killed at ~48% — the trend was STILL paying at 1.5, so 2.0+ ep is the most pro
 `qat_pq_m4s3` (m4b8 WKV + int3 shifts = exactly 352 b, est. +0.0019–0.0024 — never trained). Also open:
 whether the 6951-type single-user ahead outlier grows with epochs.
 
+## ★ NEW OBJECTIVE (Andrew 2026-07-04, task22): push ≤288 b/card at the SAME ≤+0.0025 gate
+288 b = the champion format with int4→int3 token-shifts (m2b8 PQ WKV 96 b + int3 shifts 192 b). Basis:
+the int3-shift tax measured tiny at 0.1 ep (PTQ +0.0007/+0.0004 F18; shift-QAT recovers ~+0.0003 F19) and
+every cost so far shrank with epochs; e150_pq sits at +0.0010/−0.0003 with 0.0015+ of gate margin to spend.
+**Plan:** (a) CPU PTQ diagnostic `e150s3` = e150 weights + int3 shifts, no retrain (RUNNING 02:04) — may
+already clear the gate; (b) GPU QAT `s3e150` = e150 recipe + `RWKV_QAT_SHIFT_SCOPE=card:int3,note:int3`,
+1.5 ep (config `qat_pq_s3e150.toml`, launch after the kernel-port parity check); (c) if passed:
+robustness + dev-confirm + handoff update. Backups if int3 shifts resist: m2b6 codebook (272 b),
+PQ-encode the shift vectors themselves (~176 b, needs new engine+QAT paths).
+**Speedup port from the parent repo (the other Claude, 2026-07-03):** `rwkv7_cuda.cu` (37× QAT kernel:
+warp-0 power iter + block-parallel PQ search + skip elision, all bit-exact; + zeros→empty grad buffers),
+`rwkv_model.py` (flat-row time-shift gather), `srs_model.py` (PermGather collision-free deterministic
+backward, escape hatch `RWKV_PERM_GATHER=0`) — their quant-aware deterministic step went 4,122→450 ms
+(9.2×). Ported wholesale (diffs verified to contain ONLY the speedups; our shift-QAT machinery intact),
+rebuild + `parity_lr_pq.py`/`parity_lr.py` gate before any training uses it.
+
 **★ OBJECTIVE (Andrew 2026-07-01, REVISED): minimize the FULL per-card state payload** — everything persisted
 to disk for a card: WKV factors + token-shifts + any extra terms (error-feedback `e`, codebook indices, scales)
 — **subject to the log-loss gate ≤ +0.0025 in BOTH modes on VAL, robust per-user.** Reference (full card, incl.
