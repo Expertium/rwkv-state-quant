@@ -54,8 +54,13 @@ PQ-encode the shift vectors themselves (~176 b, needs new engine+QAT paths).
 **★ STANDING ORDER (Andrew 2026-07-04 ~02:20, off to sleep): if 288 b succeeds, KEEP LOWERING BITS at the
 same gate.** Overnight ladder queued as self-driving GPU-serial chains (trainings run unconditionally —
 they're cheap on the fast kernel; the eval scores decide what's a win):
-- **Rung 1, 288 b** = m2b8 96 + int3 shifts 192: `s3e150` TRAINING (started 02:19, ~5025 steps) → chain
-  evals @288. LMDB stall fixed first (see below).
+- **Rung 1, 288 b** = m2b8 96 + int3 shifts 192: **PTQ diagnostic `e150s3` PASSES THE GATE ALREADY
+  (02:45): +0.0022 imm / +0.0006 ahead** — e150 weights + int3 shifts with NO retraining; the int3 tax on
+  this net is +0.0012/+0.0009 (bigger than F18's 0.1-ep-era +0.0007/+0.0004 but the margin holds). 288 b
+  is a WIN pending robustness; the `s3e150` QAT (int3 modeled, started 02:19, ~1.7 s/step on the ported
+  kernel = 2× our old pace — the QAT-kernel share is smaller at d=32 than at the sibling's d=128, so 2×
+  not 9×; ETA train ~04:40, score ~05:30) should recover most of the imm tax → supersedes the PTQ point.
+  LMDB stall fixed first (see below).
 - **Rung 2, 272 b** = m2b6 (64-centroid: 4×(12+8)=80 b WKV) + int3 shifts: `q272` chained on s3e150's GPU.
 - **Rung 3, 224 b** = m2b8 + INT2 (ternary) shifts 128 b: `q224` chained on q272. Tests whether shift-QAT
   × 1.5 ep rescues what was PTQ-catastrophic (+0.0041, F18) — the epochs lever has revived costs before.
