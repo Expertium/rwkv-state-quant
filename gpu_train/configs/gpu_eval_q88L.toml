@@ -1,0 +1,24 @@
+# GPU eval: q88L (m2b3 WKV + m4b6 LEARNED-cb PQ shifts), 2.0-ep QAT weights. Deploy compression applied via
+# the QAT fake-quant env in the run cmd (norms stay fp here - norm quant is engine-only, CPU eval = verdict).
+# Penalty vs result/gpuval-fp32*.jsonl (the fixed GPU baseline).
+FILE_AHEAD = "gpuval-q88L"
+FILE_IMM = "gpuval-q88L-P"
+
+MODEL_PATH = "reference/qat_pq_q88L_6702.pth"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+DATASET_LMDB_PATH = "F:/rwkv_lmdb/test_db_5k"
+DATASET_LMDB_SIZE = 250_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 40_000_000_000
+
+RAW = false
+RAW_DB_PATH = "raw/result_db"
+RAW_DB_SIZE = 3_000_000_000
+
+USER_START = 0
+USER_END = 0
+USERS_FILE = "val_users.json"
+
+NUM_FETCH_PROCESSES = 5
