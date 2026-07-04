@@ -21,5 +21,5 @@ USER_START = 0
 USER_END = 0
 USERS_FILE = "val_users.json"
 
-# 2 fetchers: serial-queue era (Andrew 14:5x — PC lagged at 97% RAM; one job at a time, lean pools)
-NUM_FETCH_PROCESSES = 2
+# 2 fetchers: serial-queue era (Andrew 14:5x â€” PC lagged at 97% RAM; one job at a time, lean pools)
+NUM_FETCH_PROCESSES = 5

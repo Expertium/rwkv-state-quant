@@ -28,7 +28,7 @@ while (-not (Test-Path $stop)) {
         }
         foreach ($pid_ in $targets) {
             $gp = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
-            if ($gp -and $gp.ProcessName -eq 'python' -and $gp.WorkingSet64 -gt 3GB) {
+            if ($gp -and $gp.ProcessName -eq 'python' -and $gp.WorkingSet64 -gt 6GB) {
                 $gb = [math]::Round($gp.WorkingSet64/1GB, 1)
                 [Win32.PsApi]::EmptyWorkingSet($gp.Handle) | Out-Null
                 "$(Get-Date -Format HH:mm:ss) trimmed PID $pid_ ($gb GB)" | Add-Content $log

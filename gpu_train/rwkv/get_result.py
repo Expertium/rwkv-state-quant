@@ -4,6 +4,8 @@ This script takes a trained model and a list of users and produces a result file
 
 import json
 import multiprocessing
+import queue as _stats_queue_mod
+import threading
 from pathlib import Path
 import traceback
 import lmdb
@@ -169,6 +171,27 @@ def run(
         lmdb.open(config.RAW_DB_PATH, map_size=config.RAW_DB_SIZE) if config.RAW else None
     )
 
+    # GPU-util fix (2026-07-04): the per-user get_stats (sklearn/pandas, pure CPU) used to run inline,
+    # idling the GPU between users. A single worker thread now consumes finished users from a bounded
+    # queue so the next user's forward overlaps the previous user's stats. Same computations, same
+    # single-writer file ordering (one worker), bounded RAM (maxsize=2).
+    stats_q = _stats_queue_mod.Queue(maxsize=2)
+
+    def stats_worker():
+        while True:
+            item = stats_q.get()
+            if item is None:
+                break
+            try:
+                item()
+            except Exception:
+                traceback.print_exc()
+            finally:
+                stats_q.task_done()
+
+    stats_thread = threading.Thread(target=stats_worker, daemon=True)
+    stats_thread.start()
+
     for i in range(min(len(users), FETCH_AHEAD)):
         user_id = users[i]
         batches = all_db_keys[user_id]
@@ -238,44 +261,53 @@ def run(
                 print("Emptying cache.")
                 torch.cuda.empty_cache()
 
-            ahead_stats, ahead_raw = get_stats(
-                user_id, equalize_review_ths, rmse_bins_dict, ahead_ps, label_ratings
-            )
-            imm_stats, imm_raw = get_stats(
-                user_id, equalize_review_ths, rmse_bins_dict, imm_ps, label_ratings
-            )
-            # ahead_raw["label_elapsed_seconds"] = [dict_stats.label_elapsed_seconds[review_th] for review_th in equalize_review_ths]
-            # ahead_raw["w"] = dict_stats.w
-            # print(type(ahead_raw['w'][0][0]))
-            # ahead_raw["s"] = [dict_stats.s[review_th] for review_th in equalize_review_ths]
-            # ahead_raw["d"] = [dict_stats.d[review_th] for review_th in equalize_review_ths]
-            imm_raw["label_elapsed_seconds"] = [
-                # .tolist() -> plain floats; np scalars/arrays are not JSON serializable
-                # (dormant RAW-path bug, hit 2026-07-03 by the entropy-floor analysis)
-                label_elapsed_seconds[review_th].tolist()
-                for review_th in equalize_review_ths
-            ]
-            imm_raw["p_all"] = [
-                imm_ps_all[review_th].tolist() for review_th in equalize_review_ths
-            ]
-            # print(ahead_raw["s"])
-            # print(imm_raw["p_all"])
+            def finish_user(
+                user_id=user_id,
+                equalize_review_ths=equalize_review_ths,
+                rmse_bins_dict=rmse_bins_dict,
+                ahead_ps=ahead_ps,
+                imm_ps=imm_ps,
+                label_ratings=label_ratings,
+                label_elapsed_seconds=label_elapsed_seconds,
+                imm_ps_all=imm_ps_all,
+                w_list=w_list,
+            ):
+                ahead_stats, ahead_raw = get_stats(
+                    user_id, equalize_review_ths, rmse_bins_dict, ahead_ps, label_ratings
+                )
+                imm_stats, imm_raw = get_stats(
+                    user_id, equalize_review_ths, rmse_bins_dict, imm_ps, label_ratings
+                )
+                imm_raw["label_elapsed_seconds"] = [
+                    # .tolist() -> plain floats; np scalars/arrays are not JSON serializable
+                    # (dormant RAW-path bug, hit 2026-07-03 by the entropy-floor analysis)
+                    label_elapsed_seconds[review_th].tolist()
+                    for review_th in equalize_review_ths
+                ]
+                imm_raw["p_all"] = [
+                    imm_ps_all[review_th].tolist() for review_th in equalize_review_ths
+                ]
 
-            def write(data, filter_set, path):
-                if user_id not in filter_set:
-                    with open(path, "a") as f:
-                        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+                def write(data, filter_set, path):
+                    if user_id not in filter_set:
+                        with open(path, "a") as f:
+                            f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
-            write(ahead_stats, ahead_users_result, ahead_path_result)
-            write(imm_stats, imm_users_result, imm_path_result)
-            if config.RAW:
-                w_tensor = torch.cat(w_list, dim=0)
-                w_equalized = w_tensor[equalize_review_ths]
-                with raw_db.begin(write=True) as txn:
-                    save_tensor(txn, f"{user_id}_w", w_equalized)
+                write(ahead_stats, ahead_users_result, ahead_path_result)
+                write(imm_stats, imm_users_result, imm_path_result)
+                if config.RAW:
+                    w_tensor = torch.cat(w_list, dim=0)
+                    w_equalized = w_tensor[equalize_review_ths]
+                    with raw_db.begin(write=True) as txn:
+                        save_tensor(txn, f"{user_id}_w", w_equalized)
 
-                write(ahead_raw, ahead_users_raw, ahead_path_raw)
-                write(imm_raw, imm_users_raw, imm_path_raw)
+                    write(ahead_raw, ahead_users_raw, ahead_path_raw)
+                    write(imm_raw, imm_users_raw, imm_path_raw)
+
+            stats_q.put(finish_user)  # overlap: GPU proceeds to the next user while stats compute
+
+    stats_q.put(None)
+    stats_thread.join()
 
 
 def sort_jsonl(file):
