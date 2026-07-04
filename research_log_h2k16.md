@@ -496,6 +496,15 @@ all QAT rungs = champion recipe 1.5 ep unless noted; base_drift/comp_cost = qfp3
 | **★★ 144 b QAT (m2b4 + PQ SHIFTS m4b8 fixed cb, 2.0 ep) — WIN (18:5x)** | **`q144_pq`** | 64 | **144** | 432 | **+0.0017/+0.0000** | (GPU eval) | — | **✓ Andrew's shift-PQ hypothesis CONFIRMED: PQ shifts (80 b) beat int2 shifts (128 b, q192 +0.0018) at FEWER bits. nbad 125/93** |
 | **★★★ 144 b + LEARNABLE shift codebook (2.0 ep) — WIN, learnable params EARN** | **`q144L_pq`** | 64 | **144** | 432 | **+0.0013/−0.0001** | (GPU eval) | — | **✓ first learnable-QAT-param lever CONFIRMED: −0.0004 imm vs its own control + better robustness (nbad 114/81 vs 125/93). CPU SPOT-CHECK PASSED (8 users, Rust RWKV_SHIFT_PQ path with the LEARNED cb: corr 0.99997, diffs = calibration noise) — train==deploy holds end-to-end. Weights `reference/qat_pq_q144L.safetensors` + `reference/pq_cb_shift_q144L.txt`** |
 | 128 b QAT (m2b4 + m4b6 LEARNABLE shift cb, 2.0 ep) | `q128L_pq` | 64 | 128 | 384 | *training (launched ~19:00)* | — | — | shifts drop to 64-centroid learnable cb: 2×(24 idx + 8 norm) = 64 b. Card = 64 + 64 |
+| 96 b QAT (m2b4 dedup-norm + m4b4 LEARNABLE shift cb, 2.0 ep) | `q96L_pq` | 48 | 96 | 288 | *queued behind q128L eval* | — | — | WKV 48 b (norm dedup) + shifts 2×(16 idx + 8 norm) = 48 b |
+
+**★ FREE 16 BITS — the WKV norm is stored TWICE (found 2026-07-04 ~19:40, science-mode restart):** the
+rank-1 split-√σ factors have IDENTICAL norms by construction (`compress_wkv_state`: uf = u·sj, vf =
+(v_un/σ)·sj, both norms = sj = √σ exactly). One scalar per head suffices ⇒ every rank-1 rung's TRUE
+payload is 16 b below its label: 352→336, 288→272, 272→256, 256→240, 224→208, 192→176, 144→128, and the
+in-flight "128" is really **112 b**. Pure accounting (zero quality cost); labels kept for continuity,
+new rungs (q96L on) use the deduped accounting. Andrew (19:35): storage solved at 144; going lower purely
+to see how far it goes.
 
 **★ EVAL STRATEGY SWITCH (Andrew 2026-07-04 ~14:00, ADOPTED 15:10): evals move CPU→GPU.** GPU eval =
 `rwkv.get_result` (ported from the sibling, USERS_FILE hook) over the 400 VAL users from `test_db_5k` (F:),
