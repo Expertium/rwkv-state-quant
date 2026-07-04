@@ -479,6 +479,20 @@ is identical to the master table's `i4r1`/`i4` rows. `≤256b?` reads off WKV+e 
 | **★★ PQ+QAT 1.0 ep (F25c sweep3) — NEW BEST @ ~352 b** | **`e100_pq`** | **~96** | **~352** | **~1056** | **Yes** | **+0.0016/+0.0005 — both pass with 2-4× margin** | +0.0018/+0.0010 | −0.0002/−0.0005 | **★★ epoch trend ALIVE at 1.0 ep (−0.0005/−0.0007 vs e75_pq). Robustness PASS, better everywhere: imm mean/med/nbad 0.0016/0.0011/108 (e75: 0.0021/0.0014/131), ahead 0.0005/0.0008/108 (e75: 0.0012/0.0012/130), Q4 imm +0.0019, same hard worst-users (6652/6787/6994). ep150/ep200 will show the turn-around point** |
 | **★★★ PQ+QAT 1.5 ep (F25c sweep3) — NEW BEST @ ~352 b** | **`e150_pq`** | **~96** | **~352** | **~1056** | **Yes** | **+0.0010/−0.0003 — ahead NEGATIVE: compressed BEATS the fp32 champion** | +0.0018/+0.0006 | **−0.0008/−0.0008** | **★★★ trend STILL paying at 1.5 ep (−0.0006/−0.0008 vs e100). comp_cost increasingly negative — PQ acts as a regularizer. Robustness PASS: imm mean/med/nbad 0.0010/0.0007/69, ahead −0.0003/+0.0002/76, Q4 imm +0.0013, same imm worst-users. Watch: user 6951 ahead outlier grew (+0.0097→+0.0246), single user, re-check at ep200** |
 
+## ★ TASK22 BIT LADDER (2026-07-04): descend from 352 b at the same +0.0025 gate
+Same columns as the QAT RESULTS table (card = full stored payload: WKV PQ + token-shifts; note = 3×card;
+all QAT rungs = champion recipe 1.5 ep unless noted; base_drift/comp_cost = qfp32−champ / deploy−qfp32).
+
+| rung | scheme | WKV (b/layer) | card (b) | note (b) | VAL vs champ | base_drift | comp_cost | verdict |
+|---|---|---|---|---|---|---|---|---|
+| 352 b reference (task21 champion) | `e150_pq` | 96 | 352 | 1056 | +0.0010/−0.0003 | +0.0018/+0.0006 | −0.0008/−0.0008 | ★ the size we descend from |
+| 288 b PTQ diagnostic (e150 weights + int3 shifts, no retrain) | `e150s3` | 96 | **288** | 864 | **+0.0022/+0.0006 — PASSES already** | (e150: +0.0018/+0.0006) | int3-shift PTQ tax +0.0012/+0.0009 vs e150_pq | ✓ gate pass with zero training — superseded by s3150_pq |
+| **★★ 288 b QAT (m2b8 + int3 shifts modeled)** | **`s3150_pq`** | 96 | **288** | 864 | **+0.0014/+0.0002 — WIN** | +0.0017/+0.0008 | −0.0003/−0.0006 | **✓ robustness PASS (nbad 101/99, Q4 +0.0017/+0.0005, 6951 outlier SHRANK to +0.0178). 352→288 costs only +0.0004/+0.0005** |
+| **★★ 272 b QAT (m2b6 64-centroid + int3 shifts)** | **`q272_pq`** | 80 | **272** | 816 | **+0.0011/−0.0003 — WIN, matches the 352-b champion** | +0.0023/+0.0011 | **−0.0011/−0.0014 (most negative yet)** | **✓ robustness PASS, best profile of ANY scheme (nbad 92/93, Q4 +0.0015/+0.0002). The 4×-coarser codebook is FREE under QAT — coarse snap = stronger regularizer** |
+| 224 b QAT (m2b8 + INT2 ternary shifts) | `q224_pq` | 96 | 224 | 672 | +0.0027/+0.0012 — imm +0.0002 OVER | **+0.0048/+0.0048 (biggest drift of any run)** | −0.0021/−0.0036 | ✗ NEAR-MISS. QAT largely rescued ternary shifts (PTQ implied ~+0.005) but int2-shift fake-quant strains the base → 2.0-ep retry `q224e2` queued; fallback = LSQ learned shift scales |
+| 256 b QAT (m2b4 16-centroid + int3 shifts) — THE ORIGINAL TARGET | `q256_pq` | 64 | **256** | 768 | *in flight (score ~11:00)* | — | — | training done 09:50; eval running |
+| 224 b RETRY @ 2.0 ep | `q224e2_pq` | 96 | 224 | 672 | *in flight (score ~15:00)* | — | — | attacks the +0.0048 drift with the epochs lever |
+
 ## ★ THE ≤256-BIT NEGATIVE RESULT (fixed net; rigorous, each step measured — F10)
 1. **rank-1 insufficient** — perfect unquantized rank-1 = +0.0028 imm > gate (F3, `r1fp`); the 2nd singular
    component carries real predictive signal (F2). State MUST carry rank-2.
