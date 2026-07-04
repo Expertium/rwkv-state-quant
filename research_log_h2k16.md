@@ -68,6 +68,14 @@ they're cheap on the fast kernel; the eval scores decide what's a win):
   worst-users; the 6951 ahead outlier SHRANK (+0.0178 vs +0.0246 at 352 b). Weights
   `reference/qat_pq_s3e150.safetensors`. Ladder proceeds: q272 on GPU (ETA score ~08:00), q224 behind it.
 - **Rung 2, 272 b** = m2b6 (64-centroid: 4×(12+8)=80 b WKV) + int3 shifts: `q272` chained on s3e150's GPU.
+  **★★ RESULT (07:16): `q272_pq` = +0.0011 imm / −0.0003 ahead — WIN, BETTER than 288 b, matches the 352-b
+  champion.** The 4× coarser codebook cost NOTHING; comp_cost = −0.0011/−0.0014, the most negative yet
+  (coarser snap = stronger regularizer under QAT). **Robustness PASS, best profile of any scheme:** imm
+  mean/med/nbad 0.0011/0.0008/92, ahead −0.0003/+0.0002/93, Q4 +0.0015/+0.0002, same hard worst-users.
+  Weights `reference/qat_pq_q272.safetensors`.
+- **Rung 4 queued (08:00), 256 b = THE ORIGINAL TARGET**: trained a fresh 16-centroid m2b4 codebook
+  (`pq_cb_m2b4.txt`, 111k dirs/role-pos from the original corpus; 4 dirs × (8 idx + 8 norm) = 64 b WKV)
+  + int3 shifts = 256 b exactly. `q256` chained behind q224 (config/cmds/chain committed).
 - **Rung 3, 224 b** = m2b8 + INT2 (ternary) shifts 128 b: `q224` chained on q272. Tests whether shift-QAT
   × 1.5 ep rescues what was PTQ-catastrophic (+0.0041, F18) — the epochs lever has revived costs before.
 - Deeper (if 224 passes / morning work): m2b6+int2 = 208 b; **PQ-encode the shift vectors** (~2×40 b →
