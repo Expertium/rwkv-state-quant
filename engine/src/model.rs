@@ -294,6 +294,12 @@ pub struct PqCodebook {
     pub k: usize,
     pub ncent: usize,
     cb: Vec<Vec<f32>>, // [role*m + pos] -> flat ncent*sub_dim centroids (centroid c at [c*sub_dim..])
+    /// RWKV_PQ_NORM_BITS: quantize the per-direction norm scalar to n bits, uniform in log2 domain over
+    /// a fixed per-codebook range (octaves). Ranges are corpus-derived globals (2026-07-04: WKV √σ spans
+    /// log2 [-2.5,-0.6], shift norms [2.4,2.7] — layernorm pins them). None = exact f32 norm (legacy).
+    pub norm_bits: Option<u32>,
+    pub norm_lo_log2: f32,
+    pub norm_hi_log2: f32,
 }
 
 impl PqCodebook {
@@ -324,18 +330,32 @@ impl PqCodebook {
             anyhow::ensure!(flat.len() == ncent * sub_dim, "PQ centroid block size mismatch");
             cb.push(flat);
         }
-        Ok(Self { m, sub_dim, k, ncent, cb })
+        Ok(Self { m, sub_dim, k, ncent, cb, norm_bits: None, norm_lo_log2: 0.0, norm_hi_log2: 0.0 })
+    }
+
+    /// Enable norm quantization (see field docs). Called by Model::load per codebook with its range.
+    pub fn set_norm_quant(&mut self, bits: u32, lo_log2: f32, hi_log2: f32) {
+        self.norm_bits = Some(bits);
+        self.norm_lo_log2 = lo_log2;
+        self.norm_hi_log2 = hi_log2;
     }
 
     /// In place: normalize `col` (K-dim) to unit, replace each sub-vector by its nearest centroid, rescale
     /// by the original norm. `role` selects the codebook set (0=u1,1=v1,2=u2,3=v2).
     #[inline]
     pub(crate) fn encode_decode(&self, role: usize, col: &mut [f32]) {
-        let norm = col.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let mut norm = col.iter().map(|x| x * x).sum::<f32>().sqrt();
         if !norm.is_finite() || norm < 1e-20 {
             return;
         }
-        let inv = 1.0 / norm;
+        let inv = 1.0 / norm; // chunks normalized by the TRUE norm (centroid match unaffected)
+        if let Some(bits) = self.norm_bits {
+            // store norm at n bits, uniform in log2 over the fixed per-codebook range
+            let levels = ((1u32 << bits) - 1) as f32;
+            let t = (norm.log2() - self.norm_lo_log2) / (self.norm_hi_log2 - self.norm_lo_log2);
+            let q = (t * levels).round().clamp(0.0, levels);
+            norm = (self.norm_lo_log2 + q / levels * (self.norm_hi_log2 - self.norm_lo_log2)).exp2();
+        }
         for p in 0..self.m {
             let s = p * self.sub_dim;
             let cents = &self.cb[role * self.m + p];
@@ -877,19 +897,31 @@ impl Model {
         let ef_elevel = std::env::var("RWKV_EF_ELEVEL")
             .ok()
             .and_then(|v| parse_level(v.as_str()));
+        // RWKV_PQ_NORM_BITS=<n>: quantize the per-direction norm scalars (WKV √σ + shift norms) to n bits,
+        // log2-uniform over fixed corpus-derived ranges (WKV [-3,0] octaves, shifts [2.2,2.9]). Cuts the
+        // per-card norm cost from 8 b/scalar to n b/scalar; PTQ-applicable (norms carry magnitude only).
+        let norm_bits: Option<u32> = std::env::var("RWKV_PQ_NORM_BITS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|n| *n >= 2 && *n <= 8);
         // Product quantization of the rank-2 factor directions: load the offline-trained codebook file.
         let pq = std::env::var("RWKV_LOWRANK_PQ").ok().filter(|s| !s.is_empty()).map(|path| {
-            std::sync::Arc::new(
-                PqCodebook::load(&path).unwrap_or_else(|e| panic!("failed to load RWKV_LOWRANK_PQ '{path}': {e}")),
-            )
+            let mut cb = PqCodebook::load(&path)
+                .unwrap_or_else(|e| panic!("failed to load RWKV_LOWRANK_PQ '{path}': {e}"));
+            if let Some(b) = norm_bits {
+                cb.set_norm_quant(b, -3.0, 0.0);
+            }
+            std::sync::Arc::new(cb)
         });
         let ef_pq = std::env::var("RWKV_EF_PQ").map(|v| v == "1" || v == "true").unwrap_or(false);
         // Product quantization of the token-shift vectors (2 roles: t_xshift, c_xshift). Fast-path only.
         let shift_pq = std::env::var("RWKV_SHIFT_PQ").ok().filter(|s| !s.is_empty()).map(|path| {
-            std::sync::Arc::new(
-                PqCodebook::load_roles(&path, 2)
-                    .unwrap_or_else(|e| panic!("failed to load RWKV_SHIFT_PQ '{path}': {e}")),
-            )
+            let mut cb = PqCodebook::load_roles(&path, 2)
+                .unwrap_or_else(|e| panic!("failed to load RWKV_SHIFT_PQ '{path}': {e}"));
+            if let Some(b) = norm_bits {
+                cb.set_norm_quant(b, 2.2, 2.9);
+            }
+            std::sync::Arc::new(cb)
         });
         // Pre-transpose every 2D linear weight (out,in) -> (in,out) contiguous ONCE, so the
         // per-token matmul needs no .t() / re-contiguous. Norm weights are 1D and skipped.
