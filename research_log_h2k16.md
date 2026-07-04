@@ -61,6 +61,12 @@ they're cheap on the fast kernel; the eval scores decide what's a win):
   kernel = 2× our old pace — the QAT-kernel share is smaller at d=32 than at the sibling's d=128, so 2×
   not 9×; ETA train ~04:40, score ~05:30) should recover most of the imm tax → supersedes the PTQ point.
   LMDB stall fixed first (see below).
+  **★★ RUNG 1 QAT RESULT (05:25): `s3150_pq` @288 b = +0.0014 imm / +0.0002 ahead — WIN with wide margin.**
+  Shift-QAT recovered 2/3 of the PTQ int3 tax (imm +0.0022→+0.0014); cost of the 352→288 drop vs e150_pq is
+  only +0.0004/+0.0005. comp_cost negative again (pq beats own base −0.0003/−0.0006). **Robustness PASS:**
+  imm mean/med/nbad 0.0014/0.0010/101, ahead 0.0002/0.0004/99, Q4 +0.0017/+0.0005 (no runaway), same hard
+  worst-users; the 6951 ahead outlier SHRANK (+0.0178 vs +0.0246 at 352 b). Weights
+  `reference/qat_pq_s3e150.safetensors`. Ladder proceeds: q272 on GPU (ETA score ~08:00), q224 behind it.
 - **Rung 2, 272 b** = m2b6 (64-centroid: 4×(12+8)=80 b WKV) + int3 shifts: `q272` chained on s3e150's GPU.
 - **Rung 3, 224 b** = m2b8 + INT2 (ternary) shifts 128 b: `q224` chained on q272. Tests whether shift-QAT
   × 1.5 ep rescues what was PTQ-catastrophic (+0.0041, F18) — the epochs lever has revived costs before.
