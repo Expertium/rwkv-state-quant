@@ -1,0 +1,24 @@
+# GPU eval calibration run 2: e150 weights under the FULL deploy-compression env (rank-1 PQ m2b8 WKV +
+# int4 shifts, applied via the QAT fake-quant forward = bit-compatible with the Rust deploy). GPU
+# penalty (this - gpuval-fp32) must match the CPU e150_pq penalty (+0.0010/-0.0003) within ~0.0002.
+FILE_AHEAD = "gpuval-e150pq"
+FILE_IMM = "gpuval-e150pq-P"
+
+MODEL_PATH = "reference/qat_pq_ep150_5026.pth"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+DATASET_LMDB_PATH = "F:/rwkv_lmdb/test_db_5k"
+DATASET_LMDB_SIZE = 250_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 40_000_000_000
+
+RAW = false
+RAW_DB_PATH = "raw/result_db"
+RAW_DB_SIZE = 3_000_000_000
+
+USER_START = 0
+USER_END = 0
+USERS_FILE = "val_users.json"
+
+NUM_FETCH_PROCESSES = 4

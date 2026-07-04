@@ -1,0 +1,24 @@
+# GPU eval calibration run 1 (Andrew: move evals CPU->GPU): champion fp32, NO compression env.
+# Per-user imm/ahead LogLoss over the 400 VAL users (test_db_5k on F:) -> result/gpuval-fp32*.jsonl.
+# Calibrate vs the CPU rust_fp32 per-user losses before adopting GPU evals.
+FILE_AHEAD = "gpuval-fp32"
+FILE_IMM = "gpuval-fp32-P"
+
+MODEL_PATH = "reference/h2k16d_904.pth"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+DATASET_LMDB_PATH = "F:/rwkv_lmdb/test_db_5k"
+DATASET_LMDB_SIZE = 250_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 40_000_000_000
+
+RAW = false
+RAW_DB_PATH = "raw/result_db"
+RAW_DB_SIZE = 3_000_000_000
+
+USER_START = 0
+USER_END = 0
+USERS_FILE = "val_users.json"
+
+NUM_FETCH_PROCESSES = 4
