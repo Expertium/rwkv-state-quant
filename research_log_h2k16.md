@@ -496,6 +496,17 @@ all QAT rungs = champion recipe 1.5 ep unless noted; base_drift/comp_cost = qfp3
 | 144 b QAT (m2b4 + PQ SHIFTS m4b8, fixed cb, 2.0 ep) | `q144_pq` | 64 | 144 | 432 | *queued behind q192* | — | — | Andrew's shift-PQ hypothesis: shifts 2×(32 idx + 8 norm) = 80 b replaces int-N entirely. Control for q144L |
 | 144 b QAT + **LEARNABLE shift codebook** (2.0 ep) | `q144L_pq` | 64 | 144 | 432 | *queued behind q144* | — | — | Andrew's QAT-params directive: codebook = trainable Parameter (embedding-grads through frozen selection, exported per save, deploy ships it). L−control = what learnable params buy |
 
+**★ EVAL STRATEGY SWITCH (Andrew 2026-07-04 ~14:00, ADOPTED 15:10): evals move CPU→GPU.** GPU eval =
+`rwkv.get_result` (ported from the sibling, USERS_FILE hook) over the 400 VAL users from `test_db_5k` (F:),
+deploy compression applied via the QAT fake-quant env (bit-compatible w/ Rust). **Calibration PASSED:**
+per-user corr 0.99995+, GPU penalty e150pq−fp32 = +0.00118/−0.00037 vs CPU +0.0010/−0.0003 (Δ ≤ 0.0002).
+Baseline files `gpu_train/result/gpuval-fp32*.jsonl` are the FIXED GPU fp32 reference. CPU (Rust) evals
+remain as ~8-user spot-checks per new scheme (train==deploy guard; mandatory for schemes touching NEW
+engine paths, e.g. RWKV_SHIFT_PQ) and as tie-breakers within 0.0002 of the gate.
+**★ OPS RULE (Andrew 2026-07-04 ~14:55, after a 100% CPU / 97% RAM lag incident): STRICT SERIAL QUEUE —
+one job at a time.** Training OMP4+fetch4; GPU eval fetch 2; RAM is first-class (three concurrent fetcher
+pools + queues held ~30 GB). Current queue: e150pq calib ✓ → q144 train → q144L train → GPU evals
+q192 → q144 → q144L (readouts ~19:30-20:30).
 **★ CONSTRAINTS UPDATE (Andrew 2026-07-04 ~13:10): (1) QAT budget HARD-CAPPED at 2.0 epochs — no 2.5/3-ep
 runs, ever; quality beyond that must come from (2) LEARNABLE PARAMETERS that assist QAT.** First learnable
 param implemented: the shift-PQ codebook (`RWKV_QAT_SHIFT_PQ_LEARN=1` — gradient co-training, wd=0 optim
