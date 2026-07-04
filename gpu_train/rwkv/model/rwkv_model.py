@@ -79,6 +79,74 @@ def fake_quant_shift(x_BTC: torch.Tensor, qmax: float) -> torch.Tensor:
     return x_BTC + (q - x_BTC).detach()
 
 
+# ---- Shift-PQ QAT (RWKV_QAT_SHIFT_PQ=<codebook file>) -----------------------------------------------
+# Product-quantize the token-shift vectors in the QAT forward, mirroring the Rust deploy RWKV_SHIFT_PQ
+# path (PqCodebook::encode_decode, 2 roles: 0 = time-mixer t_xshift, 1 = channel-mixer c_xshift):
+# normalize the C-dim vector, replace each of m sub-chunks by its nearest centroid (first strict min,
+# matching argmin tie-breaking), rescale by the norm. STE backward for the shift path. Stream gating
+# still comes from RWKV_QAT_SHIFT_SCOPE (its int level is IGNORED when the PQ codebook is set).
+# RWKV_QAT_SHIFT_PQ_LEARN=1 (Andrew's "learnable parameters to assist QAT"): the codebook becomes a
+# trainable f32 Parameter — centroids receive embedding-style gradients through the (frozen) selection,
+# i.e. GRADIENT co-training of codebook + weights jointly (unlike the dead post-hoc refit). The learned
+# codebook is exported at every save (train_rwkv) in the engine text format → deploy ships it, 0 extra
+# per-card bits. Requires RWKV_NO_JIT.
+_SHIFT_PQ_PATH = os.environ.get("RWKV_QAT_SHIFT_PQ", "")
+_SHIFT_PQ_LEARN = os.environ.get("RWKV_QAT_SHIFT_PQ_LEARN", "") == "1"
+_SHIFT_PQ_CB = None  # [2, m, ncent, sub] f32; plain tensor, or Parameter when _SHIFT_PQ_LEARN
+_SHIFT_PQ_META = None  # (m, sub, ncent)
+
+
+def shift_pq_init(device):
+    """Load the codebook onto `device` (as a trainable Parameter when RWKV_QAT_SHIFT_PQ_LEARN=1).
+    Idempotent. Call BEFORE optimizer.add_param_group so the returned Parameter is the stepped object."""
+    global _SHIFT_PQ_CB, _SHIFT_PQ_META
+    if _SHIFT_PQ_CB is None:
+        with open(_SHIFT_PQ_PATH) as fh:
+            lines = [ln for ln in fh if ln.strip()]
+        m, bits, sub, c, ncent = (int(x) for x in lines[0].split()[:5])
+        rows = [[float(x) for x in ln.split()] for ln in lines[1:]]
+        assert len(rows) == 2 * m * ncent, f"shift codebook: want {2*m*ncent} rows, got {len(rows)}"
+        cb = torch.tensor(rows, dtype=torch.float32).view(2, m, ncent, sub).to(device)
+        _SHIFT_PQ_CB = torch.nn.Parameter(cb) if _SHIFT_PQ_LEARN else cb
+        _SHIFT_PQ_META = (m, sub, ncent)
+        print(f"[QAT-SHIFT-PQ] loaded {_SHIFT_PQ_PATH}: m={m} sub={sub} ncent={ncent} roles=2 "
+              f"learnable={_SHIFT_PQ_LEARN}")
+    return _SHIFT_PQ_CB
+
+
+def shift_pq_export(path):
+    """Write the (possibly learned) codebook back in the engine text format (RWKV_SHIFT_PQ)."""
+    m, sub, ncent = _SHIFT_PQ_META
+    bits = ncent.bit_length() - 1
+    cb = _SHIFT_PQ_CB.detach().float().cpu().view(2 * m * ncent, sub)
+    lines = [f"{m} {bits} {sub} {m * sub} {ncent}"]
+    for row in cb:
+        lines.append(" ".join(f"{x:.6e}" for x in row.tolist()))
+    with open(path, "w", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def fake_pq_shift(x_BTC: torch.Tensor, role: int) -> torch.Tensor:
+    """Shift-PQ round-trip of (B,T,C), role 0 = t_xshift / 1 = c_xshift. Compute in f32 like deploy.
+    Backward: straight-through to x; embedding-style gradients to the codebook when it is a Parameter
+    (selection indices are frozen per step, like a hard-EM assignment)."""
+    cb = shift_pq_init(x_BTC.device)
+    m, sub, ncent = _SHIFT_PQ_META
+    B, T, C = x_BTC.shape
+    flat = x_BTC.reshape(-1, C).float()
+    with torch.no_grad():
+        norm = flat.norm(dim=1, keepdim=True)
+        ok = norm.squeeze(1) > 1e-20
+        unit = flat / norm.clamp_min(1e-20)
+        idxs = [torch.cdist(unit[:, p * sub:(p + 1) * sub], cb[role, p].detach()).argmin(dim=1)
+                for p in range(m)]                                     # first strict min, frozen
+    parts = [cb[role, p][idxs[p]] for p in range(m)]                   # differentiable w.r.t. cb
+    q = torch.cat(parts, dim=1) * norm
+    q = torch.where(ok.unsqueeze(1), q, flat.detach()).reshape(B, T, C).to(x_BTC.dtype)
+    # forward value = q exactly; backward: identity to x (STE) + real grads into the selected centroids
+    return q + (x_BTC - x_BTC.detach())
+
+
 class RWKV7(ModuleType):
     def __init__(self, config: RWKV7Config):
         super().__init__()
@@ -165,7 +233,10 @@ class RWKV7ChannelMixer(ModuleType):
         x_BTC = self.layer_norm(in_BTC)
         x_shift_BTC = time_shift_gather(x_BTC, time_shift_select_BT)
         if self.state_shift_qmax != float("inf"):  # shift-QAT: fake-quant the persisted shift (deploy analog)
-            x_shift_BTC = fake_quant_shift(x_shift_BTC, self.state_shift_qmax)
+            if _SHIFT_PQ_PATH:
+                x_shift_BTC = fake_pq_shift(x_shift_BTC, 1)  # role 1 = c_xshift
+            else:
+                x_shift_BTC = fake_quant_shift(x_shift_BTC, self.state_shift_qmax)
         k_BTK = self.W_k(torch.lerp(x_BTC, x_shift_BTC, self.lerp_k))
         o_BTC = self.W_v(torch.square(torch.nn.functional.relu(k_BTK)))
         return in_BTC + self.dropout(o_BTC)
@@ -362,7 +433,10 @@ class RWKV7TimeMixer(ModuleType):
         x_BTC = self.layer_norm(in_BTC)
         x_shift_BTC = time_shift_gather(x_BTC, time_shift_select_BT)
         if self.state_shift_qmax != float("inf"):  # shift-QAT: fake-quant the persisted shift (deploy analog)
-            x_shift_BTC = fake_quant_shift(x_shift_BTC, self.state_shift_qmax)
+            if _SHIFT_PQ_PATH:
+                x_shift_BTC = fake_pq_shift(x_shift_BTC, 0)  # role 0 = t_xshift
+            else:
+                x_shift_BTC = fake_quant_shift(x_shift_BTC, self.state_shift_qmax)
 
         rkvdag_8BTC = torch.lerp(
             x_BTC.unsqueeze(0), x_shift_BTC.unsqueeze(0), self.rkvdag_lerp

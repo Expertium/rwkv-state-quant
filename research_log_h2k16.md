@@ -493,6 +493,19 @@ all QAT rungs = champion recipe 1.5 ep unless noted; base_drift/comp_cost = qfp3
 | **★★★ 256 b QAT (m2b4 16-centroid + int3 shifts) — THE ORIGINAL TARGET, ACHIEVED (10:56)** | **`q256_pq`** | **64** | **256** | **768** | **+0.0014/−0.0001 — WIN, ahead negative** | +0.0019/+0.0005 | −0.0006/−0.0007 | **✓ The project's founding goal (≤256 b at ≤+0.0025), a PROVEN NEGATIVE on the fixed net (F10), falls with QAT. Robustness PASS: nbad 103/97, Q4 +0.0018/+0.0003, same hard worst-users. Even a 16-centroid codebook is ~free under QAT** |
 | **★★ 224 b RETRY @ 2.0 ep — WIN (13:09)** | **`q224e2_pq`** | 96 | **224** | 672 | **+0.0022/+0.0006 — both pass** | +0.0045/+0.0034 | −0.0024/−0.0028 | **✓ epochs cured the ternary-shift strain (1.5 ep +0.0027 → 2.0 ep +0.0022). Robustness PASSES but TIGHTEST of the ladder: imm nbad 148/400 (vs 92-103 above), Q3/Q4 means +0.0026, worst 6787 +0.0232 — still better than F15-512b's profile, nobody wrecked. int2 shifts cost spread, not just mean** |
 | 192 b QAT (m2b4 + int2 shifts, 2.0 ep) | `q192_pq` | 64 | 192 | 576 | *in flight (score ~15:30)* | — | — | combines the two proven coarsenings |
+| 144 b QAT (m2b4 + PQ SHIFTS m4b8, fixed cb, 2.0 ep) | `q144_pq` | 64 | 144 | 432 | *queued behind q192* | — | — | Andrew's shift-PQ hypothesis: shifts 2×(32 idx + 8 norm) = 80 b replaces int-N entirely. Control for q144L |
+| 144 b QAT + **LEARNABLE shift codebook** (2.0 ep) | `q144L_pq` | 64 | 144 | 432 | *queued behind q144* | — | — | Andrew's QAT-params directive: codebook = trainable Parameter (embedding-grads through frozen selection, exported per save, deploy ships it). L−control = what learnable params buy |
+
+**★ CONSTRAINTS UPDATE (Andrew 2026-07-04 ~13:10): (1) QAT budget HARD-CAPPED at 2.0 epochs — no 2.5/3-ep
+runs, ever; quality beyond that must come from (2) LEARNABLE PARAMETERS that assist QAT.** First learnable
+param implemented: the shift-PQ codebook (`RWKV_QAT_SHIFT_PQ_LEARN=1` — gradient co-training, wd=0 optim
+group added post-optim-restore, NaN-guarded in the clip, exported at every save as
+`<prefix>_shiftcb_<step>.txt` for deploy). Shift-PQ machinery built end-to-end this afternoon: engine
+`RWKV_SHIFT_PQ` deploy path (fast, 2 roles t/c, PqCodebook::load_roles) + `--dump-shift-corpus` +
+`pq_train_shift.py` (codebook `pq_cb_shift_m4b8.txt`: 445k vectors/role from the fp32 champion, 2 roles ×
+4 pos × 256 cents) + Python `fake_pq_shift` QAT (STE to x, embedding grads to cb) + parity
+`parity_shift_pq.py` (600/600 agree, max rel 1.5e-07). Next levers if 144 b needs more: learned rotation
+in the WKV sandwich (SpinQuant-style, CUDA work), WKV-codebook gradient co-training (kernel backward).
 
 ## ★ THE ≤256-BIT NEGATIVE RESULT (fixed net; rigorous, each step measured — F10)
 1. **rank-1 insufficient** — perfect unquantized rank-1 = +0.0028 imm > gate (F3, `r1fp`); the 2nd singular

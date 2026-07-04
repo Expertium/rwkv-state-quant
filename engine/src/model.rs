@@ -107,6 +107,12 @@ pub struct CompressCfg {
     /// RWKV_EF_PQ: also PQ the carried error buffer's direction (reuse `pq`) so the stabilizer is cheap
     /// (~96 b for a rank-1 `e` vs 256 b at int4) → lets PQ factors + PQ'd `e` fit ≤256 b. Needs ef_erank set.
     pub ef_pq: bool,
+    /// RWKV_SHIFT_PQ=<file>: product-quantize the TOKEN-SHIFT vectors instead of int-N. 2 roles
+    /// (0 = t_xshift, 1 = c_xshift), each C-dim vector normalized, chunked into m sub-vectors and coded
+    /// by the nearest centroid; norm kept as the scale. Replaces the int-N shift quant for compressed
+    /// streams when quant_shifts is on. m4b8 on C=32 → 4×8 idx + 8 b norm = 40 b/vector (int4 = 128+).
+    /// FAST-PATH ONLY (same precedent as `pq`; candle stays for parity A/B of non-PQ paths).
+    pub shift_pq: Option<std::sync::Arc<PqCodebook>>,
 }
 
 /// Batched state quant: t is (B,H,K,K); compute a PER-CARD (per leading-B) per-tensor amax so each
@@ -294,14 +300,20 @@ impl PqCodebook {
     /// Parse the text codebook written by `scratchpad/pq_train.py`:
     /// line1 `m bits sub_dim k ncent`, then 4*m blocks (role-major, then pos) of `ncent` centroid rows.
     pub fn load(path: &str) -> anyhow::Result<Self> {
+        Self::load_roles(path, 4)
+    }
+
+    /// Same format but with `n_roles` role blocks (WKV factor codebooks = 4 roles u1,v1,u2,v2;
+    /// token-shift codebooks = 2 roles t_xshift,c_xshift — written by `scratchpad/pq_train_shift.py`).
+    pub fn load_roles(path: &str, n_roles: usize) -> anyhow::Result<Self> {
         let txt = std::fs::read_to_string(path)?;
         let mut lines = txt.lines().filter(|l| !l.trim().is_empty());
         let hdr = lines.next().ok_or_else(|| anyhow!("empty PQ codebook file"))?;
         let h: Vec<usize> = hdr.split_whitespace().map(|x| x.parse()).collect::<Result<_, _>>()?;
         anyhow::ensure!(h.len() >= 5, "bad PQ header");
         let (m, sub_dim, k, ncent) = (h[0], h[2], h[3], h[4]);
-        let mut cb = Vec::with_capacity(4 * m);
-        for _ in 0..4 * m {
+        let mut cb = Vec::with_capacity(n_roles * m);
+        for _ in 0..n_roles * m {
             let mut flat = Vec::with_capacity(ncent * sub_dim);
             for _ in 0..ncent {
                 let ln = lines.next().ok_or_else(|| anyhow!("PQ codebook truncated"))?;
@@ -318,7 +330,7 @@ impl PqCodebook {
     /// In place: normalize `col` (K-dim) to unit, replace each sub-vector by its nearest centroid, rescale
     /// by the original norm. `role` selects the codebook set (0=u1,1=v1,2=u2,3=v2).
     #[inline]
-    fn encode_decode(&self, role: usize, col: &mut [f32]) {
+    pub(crate) fn encode_decode(&self, role: usize, col: &mut [f32]) {
         let norm = col.iter().map(|x| x * x).sum::<f32>().sqrt();
         if !norm.is_finite() || norm < 1e-20 {
             return;
@@ -872,6 +884,13 @@ impl Model {
             )
         });
         let ef_pq = std::env::var("RWKV_EF_PQ").map(|v| v == "1" || v == "true").unwrap_or(false);
+        // Product quantization of the token-shift vectors (2 roles: t_xshift, c_xshift). Fast-path only.
+        let shift_pq = std::env::var("RWKV_SHIFT_PQ").ok().filter(|s| !s.is_empty()).map(|path| {
+            std::sync::Arc::new(
+                PqCodebook::load_roles(&path, 2)
+                    .unwrap_or_else(|e| panic!("failed to load RWKV_SHIFT_PQ '{path}': {e}")),
+            )
+        });
         // Pre-transpose every 2D linear weight (out,in) -> (in,out) contiguous ONCE, so the
         // per-token matmul needs no .t() / re-contiguous. Norm weights are 1D and skipped.
         let mut lin_wt: TMap = HashMap::new();
@@ -899,6 +918,7 @@ impl Model {
             ef_elevel,
             pq,
             ef_pq,
+            shift_pq,
         };
         let fast = crate::fast::FastModel::build(
             &w, &lin_wt, c, h, k, stream_layers.clone(), num_curves, num_points,

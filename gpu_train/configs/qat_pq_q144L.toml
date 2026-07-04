@@ -1,0 +1,39 @@
+# 144-b rung (task22, LEARNABLE shift codebook — Andrew's QAT-params directive): m2b4 PQ WKV 64 b + PQ TOKEN-SHIFTS (m4b8 on C=32:
+# 2 vectors x (4x8 idx + 8 norm) = 80 b) = 144 b/card. 2.0 ep (int2-era lesson: shift compression needs
+# the longer recovery). QAT: RWKV_QAT_PQ=m2b4 + RWKV_QAT_SHIFT_PQ=shift codebook (scope gates streams).
+# Deploy: RWKV_LOWRANK_PQ=m2b4 + RWKV_QUANT_SHIFTS=1 + RWKV_SHIFT_PQ=shift codebook.
+# NUM_FETCH_PROCESSES=4 per the 14-thread CPU+GPU budget (training 8 = OMP 4 + fetch 4; eval 6).
+TRAIN_USERS_START = 1000
+TRAIN_USERS_END = 2499
+VALIDATE_USERS_START = 101
+VALIDATE_USERS_END = 110
+
+TRAIN_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/train_db_sc8k_1500"
+TRAIN_DATASET_LMDB_SIZE = 80_000_000_000
+VALIDATE_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/test_db"
+VALIDATE_DATASET_LMDB_SIZE = 8_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 2_000_000_000
+
+NUM_FETCH_PROCESSES = 4
+MAX_TRAIN_GLOBAL_LEN = 66000
+
+TRAIN_MODE = "D"
+STEP_OFFSET = 1
+WARMUP_STEPS = 0
+EPOCHS = 2.0
+VALIDATE_EVERY = 100000
+PEAK_LR = 1e-3
+
+LOAD_MODEL = true
+LOAD_MODEL_FOLDER = "reference"
+LOAD_MODEL_NAME = "h2k16d_904"
+SAVE_MODEL_FOLDER = "reference"
+SAVE_MODEL_PREFIX = "qat_pq_q144L"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+USE_WANDB = false
+WANDB_PROJECT_NAME = "rwkv"
+WANDB_RESUME = false
+WANDB_RESUME_ID = ""

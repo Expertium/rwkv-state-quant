@@ -503,13 +503,22 @@ impl FastModel {
                 .get(&m)
                 .and_then(|&(_, fq)| fq)
                 .or_else(|| cfg.quant_qmax.get(&m).copied());
-            // Override the shift LEVEL for already-compressed streams (RWKV_STATE_SHIFT_LEVEL); leave
-            // uncompressed streams unquantized. Lets shifts go coarser than the WKV factors.
-            let shift_qmax = base.map(|b| cfg.shift_qmax_override.unwrap_or(b));
-            if let Some(q) = shift_qmax {
+            // RWKV_SHIFT_PQ: codebook-encode the shift vectors of compressed streams (roles 0=t, 1=c)
+            // instead of int-N — the WKV-PQ idea applied to the shift payload (40 b/vector at m4b8).
+            if let (Some(pq), true) = (&cfg.shift_pq, base.is_some()) {
                 for bi in 0..b {
-                    crate::model::quant_vec_inplace(&mut t_xshift[bi * c..(bi + 1) * c], q);
-                    crate::model::quant_vec_inplace(&mut c_xshift[bi * c..(bi + 1) * c], q);
+                    pq.encode_decode(0, &mut t_xshift[bi * c..(bi + 1) * c]);
+                    pq.encode_decode(1, &mut c_xshift[bi * c..(bi + 1) * c]);
+                }
+            } else {
+                // Override the shift LEVEL for already-compressed streams (RWKV_STATE_SHIFT_LEVEL); leave
+                // uncompressed streams unquantized. Lets shifts go coarser than the WKV factors.
+                let shift_qmax = base.map(|b| cfg.shift_qmax_override.unwrap_or(b));
+                if let Some(q) = shift_qmax {
+                    for bi in 0..b {
+                        crate::model::quant_vec_inplace(&mut t_xshift[bi * c..(bi + 1) * c], q);
+                        crate::model::quant_vec_inplace(&mut c_xshift[bi * c..(bi + 1) * c], q);
+                    }
                 }
             }
         }

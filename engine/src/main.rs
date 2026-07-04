@@ -739,6 +739,51 @@ fn dump_corpus(model: &Model, user: i64, stream: &str, stride: usize) -> Result<
     Ok(())
 }
 
+/// --dump-shift-corpus <user> <card|note> [stride]: warm up the user ONCE and emit the fp32 TOKEN-SHIFT
+/// vectors of the chosen compressed stream, one per line: `TS <C floats>` (time-mixer shift) and
+/// `CS <C floats>` (channel-mixer shift), per layer. Corpus builder for the shift-PQ codebook
+/// (pq_train_shift.py). Skips all-zero / non-finite vectors.
+fn dump_shift_corpus(model: &Model, user: i64, stream: &str, stride: usize) -> Result<()> {
+    let wm = warmup(model, user)?;
+    let stride = stride.max(1);
+    let (_h, _k, c) = model.dims();
+    let mut emitted = 0usize;
+    let states: Vec<&StreamState> = match stream {
+        "card" => wm.card_order.iter().filter_map(|cid| wm.s_card.get(cid)).collect(),
+        "note" => {
+            let mut keys: Vec<i64> = wm.s_note.keys().copied().collect();
+            keys.sort_unstable();
+            keys.iter().filter_map(|nid| wm.s_note.get(nid)).collect()
+        }
+        other => anyhow::bail!("unknown stream '{other}' (use card|note)"),
+    };
+    for (idx, ss) in states.iter().enumerate() {
+        if idx % stride != 0 {
+            continue;
+        }
+        for layer in ss.iter() {
+            for (tag, t) in [("TS", &layer.t_xshift), ("CS", &layer.c_xshift)] {
+                let fp32: Vec<f32> = t.flatten_all()?.to_vec1()?;
+                if fp32.len() != c || !fp32.iter().all(|x| x.is_finite()) {
+                    continue;
+                }
+                let amax = fp32.iter().fold(0f32, |m, x| m.max(x.abs()));
+                if amax < 1e-12 {
+                    continue;
+                }
+                let mut line = String::from(tag);
+                for v in &fp32 {
+                    line.push_str(&format!(" {v:.7e}"));
+                }
+                println!("{line}");
+                emitted += 1;
+            }
+        }
+    }
+    eprintln!("dumped {emitted} {stream} shift vectors for user {user} (stride {stride}, c={c})");
+    Ok(())
+}
+
 /// Convert candle batched states -> fast (flat f32) states for the plain-Rust path.
 fn batched_to_fast(
     states: &[Option<BatchedStreamState>; 5],
@@ -913,6 +958,15 @@ fn main() -> Result<()> {
         let user: i64 = argv.get(1).map(|s| s.parse().unwrap()).unwrap_or(107);
         let stride: usize = argv.get(2).map(|s| s.parse().unwrap()).unwrap_or(1);
         return dump_card_corpus(&model, user, stride);
+    }
+
+    // --dump-shift-corpus <user> <card|note> [stride]: emit real token-shift vectors for the shift-PQ
+    // codebook training. See dump_shift_corpus.
+    if argv.first().map(|s| s.as_str()) == Some("--dump-shift-corpus") {
+        let user: i64 = argv.get(1).expect("--dump-shift-corpus needs <user>").parse()?;
+        let stream = argv.get(2).map(|s| s.as_str()).unwrap_or("card").to_string();
+        let stride: usize = argv.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
+        return dump_shift_corpus(&model, user, &stream, stride);
     }
 
     // --dump-corpus <user> <card|note> [stride]: emit many real card/note WKV states (one replay) for the

@@ -414,6 +414,19 @@ def main_loop(config, task_queue, batch_queue):
         print("No model loaded.")
     model.copy_downcast_(master_model, dtype=config.DTYPE)
 
+    # Shift-PQ learnable codebook (RWKV_QAT_SHIFT_PQ_LEARN=1): register the codebook Parameter with the
+    # optimizer AFTER the champion-optim restore (so load_state_dict sees matching groups) and BEFORE the
+    # scheduler is built (so the LambdaLR covers the new group). wd=0 — centroids are a codebook, not
+    # weights to shrink. Gradients arrive from `model`'s forward directly on the shared global Parameter.
+    _shift_cb_param = None
+    if os.environ.get("RWKV_QAT_SHIFT_PQ", "") and os.environ.get("RWKV_QAT_SHIFT_PQ_LEARN", "") == "1":
+        from rwkv.model import rwkv_model as _rwkv_model_mod
+        _shift_cb_param = _rwkv_model_mod.shift_pq_init(config.DEVICE)
+        optimizer.add_param_group(
+            {"params": [_shift_cb_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
+        )
+        print(f"[shift-pq] codebook LEARNABLE: {tuple(_shift_cb_param.shape)} added as optim group (wd=0)")
+
     num_trainable_parameters = get_number_of_trainable_parameters(model)
     print(f"Trainable parameters: {num_trainable_parameters}")
 
@@ -594,7 +607,11 @@ def main_loop(config, task_queue, batch_queue):
 
                 # NaN/inf safeguard: clip_grad_norm_ returns the total grad norm; if it's non-finite, a NaN
                 # grad slipped through -> DO NOT step (that would write NaN into the weights and kill the model).
-                total_norm = torch.nn.utils.clip_grad_norm_(master_model.parameters(), CLIP)
+                # The learnable shift-PQ codebook (if any) joins the clip so a NaN centroid grad also blocks the step.
+                _clip_params = list(master_model.parameters())
+                if _shift_cb_param is not None:
+                    _clip_params.append(_shift_cb_param)
+                total_norm = torch.nn.utils.clip_grad_norm_(_clip_params, CLIP)
                 if torch.isfinite(total_norm):
                     optimizer.step()
                 else:
@@ -628,6 +645,11 @@ def main_loop(config, task_queue, batch_queue):
                 if ema_state is not None:  # save the averaged weights for eval ({prefix}_ema_{step}.pth)
                     ema_full = {k: ema_state.get(k, v) for k, v in master_model.state_dict().items()}
                     torch.save(ema_full, f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_ema_{step}.pth")
+                if _shift_cb_param is not None:  # export the LEARNED shift codebook (engine text format)
+                    from rwkv.model import rwkv_model as _rwkv_model_mod
+                    _rwkv_model_mod.shift_pq_export(
+                        f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_shiftcb_{step}.txt"
+                    )
                 print("MODEL SAVED.")
                 elapsed = time.time() - group_start
                 log["elapsed"] = elapsed
