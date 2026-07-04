@@ -1,6 +1,6 @@
-# 256-b rung (task22 ladder) - THE ORIGINAL TARGET SIZE: m2b4 PQ WKV (16-centroid: 4 dirs x (8 idx + 8
-# norm) = 64 b) + int3 shifts 192 b = 256 b/card. Champion recipe (1.5 ep). Deploy: RWKV_LOWRANK_PQ=m2b4 +
-# RWKV_STATE_SHIFT_LEVEL=int3. (Rewritten BOM-free: PS5.1 Set-Content utf8 wrote a BOM, tomli choked.)
+# 224-b RETRY at 2.0 ep (task22): q224 at 1.5 ep was a NEAR-MISS (+0.0027 imm, +0.0002 over gate; ahead
+# +0.0012 passes). Its base_drift was +0.0048 — the int2-shift fake-quant strains the base hard, and drift
+# is exactly what the epochs lever fixes (monotone at every point measured). Same recipe, EPOCHS=2.0.
 TRAIN_USERS_START = 1000
 TRAIN_USERS_END = 2499
 VALIDATE_USERS_START = 101
@@ -19,7 +19,7 @@ MAX_TRAIN_GLOBAL_LEN = 66000
 TRAIN_MODE = "D"
 STEP_OFFSET = 1
 WARMUP_STEPS = 0
-EPOCHS = 1.5
+EPOCHS = 2.0
 VALIDATE_EVERY = 100000
 PEAK_LR = 1e-3
 
@@ -27,7 +27,7 @@ LOAD_MODEL = true
 LOAD_MODEL_FOLDER = "reference"
 LOAD_MODEL_NAME = "h2k16d_904"
 SAVE_MODEL_FOLDER = "reference"
-SAVE_MODEL_PREFIX = "qat_pq_q256"
+SAVE_MODEL_PREFIX = "qat_pq_q224e2"
 DEVICE = "cuda"
 DTYPE = "bfloat16"
 

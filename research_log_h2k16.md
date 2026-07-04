@@ -78,6 +78,12 @@ they're cheap on the fast kernel; the eval scores decide what's a win):
   + int3 shifts = 256 b exactly. `q256` chained behind q224 (config/cmds/chain committed).
 - **Rung 3, 224 b** = m2b8 + INT2 (ternary) shifts 128 b: `q224` chained on q272. Tests whether shift-QAT
   × 1.5 ep rescues what was PTQ-catastrophic (+0.0041, F18) — the epochs lever has revived costs before.
+  **RESULT (09:11): `q224_pq` = +0.0027 imm / +0.0012 ahead — NEAR-MISS, imm +0.0002 over the gate.** QAT
+  did largely rescue ternary shifts (PTQ implied ~+0.005). Decomposition tells the story: base_drift
+  **+0.0048/+0.0048** (int2-shift fake-quant strains the base hard — biggest drift of any run), comp_cost
+  **−0.0021/−0.0036** (hugely negative). Drift is what epochs fix → **RETRY at 2.0 ep queued (`q224e2`,
+  chained behind q256; config/cmds committed).** If that still misses: LSQ learned shift step sizes
+  (QAT-param idea #3) is the targeted build.
 - Deeper (if 224 passes / morning work): m2b6+int2 = 208 b; **PQ-encode the shift vectors** (~2×40 b →
   card ~176 b, new engine+QAT paths — the deep lever).
 **QAT-dedicated parameters (Andrew's idea, 2026-07-04 ~02:30) — surgical grafts, NO fresh retrain needed
