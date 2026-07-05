@@ -414,6 +414,30 @@ def main_loop(config, task_queue, batch_queue):
         print("No model loaded.")
     model.copy_downcast_(master_model, dtype=config.DTYPE)
 
+    # KD teacher (RWKV_QAT_KD=<lambda>, task22): a frozen, UN-quantized copy of the run's starting
+    # champion. QAT gating lives in per-module fields copied from the arch config at build time, so
+    # resetting those fields on this instance strips every fake-quant hook (WKV low-rank/PQ, shift
+    # PQ/rotation, norm quant all nest inside these guards) while `model` keeps them.
+    _kd_lam = float(os.environ.get("RWKV_QAT_KD", "0") or 0)
+    _teacher = None
+    if _kd_lam > 0:
+        assert config.LOAD_MODEL, "KD needs a champion checkpoint to distill from"
+        _teacher = SrsRWKV(anki_rwkv_config=DEFAULT_ANKI_RWKV_CONFIG)
+        _teacher.load_state_dict(torch.load(model_path, weights_only=True))
+        _teacher = _teacher.selective_cast(config.DTYPE).to(config.DEVICE)
+        _n_stripped = 0
+        for _m in _teacher.modules():
+            if getattr(_m, "state_shift_qmax", float("inf")) != float("inf"):
+                _m.state_shift_qmax = float("inf"); _n_stripped += 1
+            if getattr(_m, "state_qmax", float("inf")) != float("inf"):
+                _m.state_qmax = float("inf"); _n_stripped += 1
+            if getattr(_m, "state_lowrank_rank", 0) > 0:
+                _m.state_lowrank_rank = 0; _n_stripped += 1
+        _teacher.eval()
+        for _p in _teacher.parameters():
+            _p.requires_grad_(False)
+        print(f"[KD] teacher = {model_path}, {_n_stripped} QAT hooks stripped, lambda = {_kd_lam}")
+
     # Shift-PQ learnable codebook (RWKV_QAT_SHIFT_PQ_LEARN=1): register the codebook Parameter with the
     # optimizer AFTER the champion-optim restore (so load_state_dict sees matching groups) and BEFORE the
     # scheduler is built (so the LambdaLR covers the new group). wd=0 — centroids are a codebook, not
@@ -446,6 +470,51 @@ def main_loop(config, task_queue, batch_queue):
             {"params": [_wkv_cb_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
         )
         print(f"[wkv-pq] codebook LEARNABLE: {tuple(_wkv_cb_param.shape)} added as optim group (wd=0)")
+
+    # Dead-centroid resurrection (RWKV_QAT_CB_RESURRECT=1, task22): with 16-32-entry catalogs, a
+    # centroid nothing selects receives ~zero gradient and is wasted capacity exactly where capacity
+    # binds. Grads for both learnable codebooks already exist every step, so track a per-centroid
+    # grad-norm EMA and periodically re-seed dead entries next to the busiest centroid of their block.
+    _resurrect = os.environ.get("RWKV_QAT_CB_RESURRECT", "") == "1"
+    _res_ema = {}
+    _RES_EVERY, _RES_WARMUP, _RES_REL, _RES_DECAY = 250, 500, 0.02, 0.99
+
+    def _resurrect_step(step_no):
+        specs = []
+        if _shift_cb_param is not None and _shift_cb_param.grad is not None:
+            _r2, _m, _nc, _sd = _shift_cb_param.shape
+            specs.append(("shiftcb", _shift_cb_param, (_r2 * _m, _nc, _sd), None))
+        if _wkv_cb_param is not None and _wkv_cb_param.grad is not None:
+            from rwkv.model import rwkv_ops as _ro
+            _m, _sd, _nc = _ro._PQ_META[0], _ro._PQ_META[1], _ro._PQ_META[2]
+            specs.append(("wkvcb", _wkv_cb_param, (2 * _m, _nc, _sd), _ro))
+        for name, p, (nb, nc, sd), ro in specs:
+            gn = p.grad.detach().float().view(nb, nc, sd).norm(dim=-1)  # [blocks, centroids]
+            ema = _res_ema.get(name)
+            _res_ema[name] = gn.clone() if ema is None else _RES_DECAY * ema + (1 - _RES_DECAY) * gn
+            if step_no < _RES_WARMUP or step_no % _RES_EVERY != 0:
+                continue
+            ema = _res_ema[name]
+            data = p.data.view(nb, nc, sd)
+            n_res = 0
+            with torch.no_grad():
+                for b in range(nb):
+                    med = ema[b].median()
+                    if med <= 0:
+                        continue
+                    dead = (ema[b] < _RES_REL * med).nonzero().flatten()
+                    if dead.numel() == 0:
+                        continue
+                    busy = int(ema[b].argmax())
+                    noise = 0.05 * data[b].std()
+                    for c in dead.tolist():
+                        data[b, c] = data[b, busy] + noise * torch.randn(sd, device=data.device)
+                        ema[b, c] = ema[b, busy]  # grace period before it can be re-killed
+                        n_res += 1
+            if n_res:
+                print(f"[resurrect] step {step_no}: {name} re-seeded {n_res} dead centroid(s)")
+                if ro is not None:
+                    ro.wkv_pq_reupload()  # push the edited centroids to the kernel globals
 
     num_trainable_parameters = get_number_of_trainable_parameters(model)
     print(f"Trainable parameters: {num_trainable_parameters}")
@@ -594,7 +663,26 @@ def main_loop(config, task_queue, batch_queue):
             model.copy_downcast_(master_model, dtype=config.DTYPE)
             model.train()
             try:
-                stats = model.get_loss(prepared_batch)
+                kd_args = None
+                if _teacher is not None:
+                    with torch.no_grad():
+                        t_ahead, t_w, _t_wlp, t_p = _teacher.forward_batch(
+                            prepared_batch.start,
+                            prepared_batch.sub_gather,
+                            prepared_batch.sub_gather_lens,
+                            prepared_batch.time_shift_selects,
+                            prepared_batch.skips,
+                            prepared_batch.num_data,
+                        )
+                        _les = prepared_batch.labels.float()[..., 0].unsqueeze(-1)
+                        _tcr = _teacher.forgetting_curve(t_w, _les).clamp(1e-5, 1 - 1e-5)
+                        _tcl = torch.log(_tcr / (1 - _tcr)) + _teacher.interp(t_ahead, _les)
+                        kd_args = (
+                            t_p.float(),
+                            torch.sigmoid(_tcl).clamp(1e-5, 1 - 1e-5).float(),
+                            _kd_lam,
+                        )
+                stats = model.get_loss(prepared_batch, kd=kd_args)
                 if stats is None:
                     raise Exception("Stats is none.")
                 if not torch.isfinite(stats.average_loss):  # NaN/inf safeguard: skip, don't backprop garbage
@@ -645,6 +733,8 @@ def main_loop(config, task_queue, batch_queue):
                     optimizer.step()
                     if _wkv_cb_param is not None:  # push stepped centroids to the kernel globals
                         _rwkv_ops_mod.wkv_pq_reupload()
+                    if _resurrect:
+                        _resurrect_step(step)
                 else:
                     print("Non-finite grad norm; skipping optimizer step (weights protected).")
                     log["train_nan"] = 1
