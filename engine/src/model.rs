@@ -350,11 +350,16 @@ impl PqCodebook {
         }
         let inv = 1.0 / norm; // chunks normalized by the TRUE norm (centroid match unaffected)
         if let Some(bits) = self.norm_bits {
-            // store norm at n bits, uniform in log2 over the fixed per-codebook range
-            let levels = ((1u32 << bits) - 1) as f32;
-            let t = (norm.log2() - self.norm_lo_log2) / (self.norm_hi_log2 - self.norm_lo_log2);
-            let q = (t * levels).round().clamp(0.0, levels);
-            norm = (self.norm_lo_log2 + q / levels * (self.norm_hi_log2 - self.norm_lo_log2)).exp2();
+            if bits == 0 {
+                // 0 bits: norm = the FIXED range midpoint (nothing stored per card at all)
+                norm = ((self.norm_lo_log2 + self.norm_hi_log2) * 0.5).exp2();
+            } else {
+                // store norm at n bits, uniform in log2 over the fixed per-codebook range
+                let levels = ((1u32 << bits) - 1) as f32;
+                let t = (norm.log2() - self.norm_lo_log2) / (self.norm_hi_log2 - self.norm_lo_log2);
+                let q = (t * levels).round().clamp(0.0, levels);
+                norm = (self.norm_lo_log2 + q / levels * (self.norm_hi_log2 - self.norm_lo_log2)).exp2();
+            }
         }
         for p in 0..self.m {
             let s = p * self.sub_dim;
@@ -900,10 +905,11 @@ impl Model {
         // RWKV_PQ_NORM_BITS=<n>: quantize the per-direction norm scalars (WKV √σ + shift norms) to n bits,
         // log2-uniform over fixed corpus-derived ranges (WKV [-3,0] octaves, shifts [2.2,2.9]). Cuts the
         // per-card norm cost from 8 b/scalar to n b/scalar; PTQ-applicable (norms carry magnitude only).
+        // n=0 = FIXED midpoint norm (ZERO stored bits/scalar); int5==int4==int3==int2 proved free (task22).
         let norm_bits: Option<u32> = std::env::var("RWKV_PQ_NORM_BITS")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .filter(|n| *n >= 2 && *n <= 8);
+            .filter(|n| *n <= 8);
         // Product quantization of the rank-2 factor directions: load the offline-trained codebook file.
         let pq = std::env::var("RWKV_LOWRANK_PQ").ok().filter(|s| !s.is_empty()).map(|path| {
             let mut cb = PqCodebook::load(&path)
