@@ -419,6 +419,7 @@ def main_loop(config, task_queue, batch_queue):
     # scheduler is built (so the LambdaLR covers the new group). wd=0 — centroids are a codebook, not
     # weights to shrink. Gradients arrive from `model`'s forward directly on the shared global Parameter.
     _shift_cb_param = None
+    _shift_rot_param = None
     if os.environ.get("RWKV_QAT_SHIFT_PQ", "") and os.environ.get("RWKV_QAT_SHIFT_PQ_LEARN", "") == "1":
         from rwkv.model import rwkv_model as _rwkv_model_mod
         _shift_cb_param = _rwkv_model_mod.shift_pq_init(config.DEVICE)
@@ -426,6 +427,14 @@ def main_loop(config, task_queue, batch_queue):
             {"params": [_shift_cb_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
         )
         print(f"[shift-pq] codebook LEARNABLE: {tuple(_shift_cb_param.shape)} added as optim group (wd=0)")
+    if os.environ.get("RWKV_QAT_SHIFT_PQ", "") and os.environ.get("RWKV_QAT_SHIFT_ROT", "") == "1":
+        from rwkv.model import rwkv_model as _rwkv_model_mod
+        _c = int(os.environ.get("RWKV_N_HEADS", "2")) * int(os.environ.get("RWKV_HEAD_DIM", "16"))
+        _shift_rot_param = _rwkv_model_mod.shift_rot_init(config.DEVICE, _c)
+        optimizer.add_param_group(
+            {"params": [_shift_rot_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
+        )
+        print(f"[shift-rot] learned pre-rotation: {tuple(_shift_rot_param.shape)} added as optim group (wd=0)")
     # WKV-PQ learnable codebook (RWKV_QAT_PQ_LEARN=1): same treatment. Grads do NOT arrive via autograd —
     # the lr backward kernel accumulates them in a device buffer; the loop below zeroes it before backward
     # and fetches it into .grad after, then re-uploads the stepped centroids to the kernel globals.
@@ -627,6 +636,8 @@ def main_loop(config, task_queue, batch_queue):
                 _clip_params = list(master_model.parameters())
                 if _shift_cb_param is not None:
                     _clip_params.append(_shift_cb_param)
+                if _shift_rot_param is not None:
+                    _clip_params.append(_shift_rot_param)
                 if _wkv_cb_param is not None:
                     _clip_params.append(_wkv_cb_param)
                 total_norm = torch.nn.utils.clip_grad_norm_(_clip_params, CLIP)
@@ -674,6 +685,11 @@ def main_loop(config, task_queue, batch_queue):
                     from rwkv.model import rwkv_ops as _rwkv_ops_mod2
                     _rwkv_ops_mod2.wkv_pq_export(
                         f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_wkvcb_{step}.txt"
+                    )
+                if _shift_rot_param is not None:  # export the LEARNED shift rotation (engine format)
+                    from rwkv.model import rwkv_model as _rwkv_model_mod
+                    _rwkv_model_mod.shift_rot_export(
+                        f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_shiftrot_{step}.txt"
                     )
                 print("MODEL SAVED.")
                 elapsed = time.time() - group_start

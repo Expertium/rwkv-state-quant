@@ -505,10 +505,20 @@ impl FastModel {
                 .or_else(|| cfg.quant_qmax.get(&m).copied());
             // RWKV_SHIFT_PQ: codebook-encode the shift vectors of compressed streams (roles 0=t, 1=c)
             // instead of int-N — the WKV-PQ idea applied to the shift payload (40 b/vector at m4b8).
+            // RWKV_SHIFT_ROT: optional learned pre-rotation — rotate, encode, un-rotate (norms invariant).
             if let (Some(pq), true) = (&cfg.shift_pq, base.is_some()) {
                 for bi in 0..b {
-                    pq.encode_decode(0, &mut t_xshift[bi * c..(bi + 1) * c]);
-                    pq.encode_decode(1, &mut c_xshift[bi * c..(bi + 1) * c]);
+                    for (role, xs) in [(0usize, &mut t_xshift[..]), (1, &mut c_xshift[..])] {
+                        let sl = &mut xs[bi * c..(bi + 1) * c];
+                        if let Some(rot) = &cfg.shift_rot {
+                            let rb = &rot[role * c * c..(role + 1) * c * c];
+                            crate::model::rot_apply(rb, sl, false);
+                            pq.encode_decode(role, sl);
+                            crate::model::rot_apply(rb, sl, true);
+                        } else {
+                            pq.encode_decode(role, sl);
+                        }
+                    }
                 }
             } else {
                 // Override the shift LEVEL for already-compressed streams (RWKV_STATE_SHIFT_LEVEL); leave

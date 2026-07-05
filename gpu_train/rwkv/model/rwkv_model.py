@@ -111,6 +111,49 @@ def _nq_quant_norm(norm):
     return torch.exp2(_SHIFT_NQ_LO + q / levels * (_SHIFT_NQ_HI - _SHIFT_NQ_LO))
 
 
+# RWKV_QAT_SHIFT_ROT=1: LEARNED PRE-ROTATION for the shift PQ (SpinQuant/QuaRot adapted to product
+# quantization). A per-role orthogonal R (Cayley: R = (I-A)(I+A)^-1, A = P - P^T, P learnable, P=0 ->
+# R=I at init) rotates the C-dim shift vector BEFORE the chunk split and un-rotates the reconstruction.
+# Rationale: product codebooks cannot express cross-chunk correlation; a learned rotation can move it
+# across the chunk boundary — the one lever untested against the m4b5 capacity wall. Norms are
+# rotation-invariant, so the norm path (incl. _NORM_BITS) is untouched. Deploy: engine RWKV_SHIFT_ROT
+# loads the exported matrices and mirrors rotate -> encode_decode -> unrotate.
+_SHIFT_ROT_LEARN = os.environ.get("RWKV_QAT_SHIFT_ROT", "") == "1"
+_SHIFT_ROT_P = None  # Parameter [2, C, C] (the unconstrained Cayley pre-image), or None
+
+
+def shift_rot_init(device, c):
+    """Create the rotation Parameter (idempotent). Call BEFORE optimizer.add_param_group."""
+    global _SHIFT_ROT_P
+    if _SHIFT_ROT_LEARN and _SHIFT_ROT_P is None:
+        _SHIFT_ROT_P = torch.nn.Parameter(torch.zeros(2, c, c, dtype=torch.float32, device=device))
+        print(f"[QAT-SHIFT-ROT] learned shift pre-rotation ON: 2 x {c}x{c} Cayley (init = identity)")
+    return _SHIFT_ROT_P
+
+
+def _shift_rot_matrix(role):
+    """The orthogonal R for `role`, differentiable w.r.t. _SHIFT_ROT_P. None when the lever is off."""
+    if _SHIFT_ROT_P is None:
+        return None
+    p = _SHIFT_ROT_P[role]
+    a = p - p.T
+    eye = torch.eye(a.shape[0], dtype=a.dtype, device=a.device)
+    return torch.linalg.solve(eye + a, eye - a)  # (I+A)^-1 (I-A), orthogonal for any A skew
+
+
+def shift_rot_export(path):
+    """Write the exact orthogonal matrices (engine text format: 2 role blocks of C rows x C floats)."""
+    with torch.no_grad():
+        mats = [_shift_rot_matrix(r).detach().float().cpu() for r in (0, 1)]
+    c = mats[0].shape[0]
+    lines = [f"{c}"]
+    for m_ in mats:
+        for row in m_:
+            lines.append(" ".join(f"{x:.8e}" for x in row.tolist()))
+    with open(path, "w", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
 def shift_pq_init(device):
     """Load the codebook onto `device` (as a trainable Parameter when RWKV_QAT_SHIFT_PQ_LEARN=1).
     Idempotent. Call BEFORE optimizer.add_param_group so the returned Parameter is the stepped object."""
@@ -149,16 +192,20 @@ def fake_pq_shift(x_BTC: torch.Tensor, role: int) -> torch.Tensor:
     m, sub, ncent = _SHIFT_PQ_META
     B, T, C = x_BTC.shape
     flat = x_BTC.reshape(-1, C).float()
+    rot = _shift_rot_matrix(role)                                      # None unless RWKV_QAT_SHIFT_ROT=1
     with torch.no_grad():
-        norm = flat.norm(dim=1, keepdim=True)
+        work = flat if rot is None else flat @ rot.T.detach()          # encode in the ROTATED basis
+        norm = work.norm(dim=1, keepdim=True)                          # (= ||flat||: R is orthogonal)
         ok = norm.squeeze(1) > 1e-20
-        unit = flat / norm.clamp_min(1e-20)                            # matching by the TRUE norm
+        unit = work / norm.clamp_min(1e-20)                            # matching by the TRUE norm
         idxs = [torch.cdist(unit[:, p * sub:(p + 1) * sub], cb[role, p].detach()).argmin(dim=1)
                 for p in range(m)]                                     # first strict min, frozen
         if _NORM_BITS:
             norm = _nq_quant_norm(norm)                                # reconstruct with quantized norm
     parts = [cb[role, p][idxs[p]] for p in range(m)]                   # differentiable w.r.t. cb
     q = torch.cat(parts, dim=1) * norm
+    if rot is not None:
+        q = q @ rot                                                    # un-rotate; real grads into R
     q = torch.where(ok.unsqueeze(1), q, flat.detach()).reshape(B, T, C).to(x_BTC.dtype)
     # forward value = q exactly; backward: identity to x (STE) + real grads into the selected centroids
     return q + (x_BTC - x_BTC.detach())

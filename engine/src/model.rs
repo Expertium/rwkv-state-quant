@@ -113,6 +113,26 @@ pub struct CompressCfg {
     /// streams when quant_shifts is on. m4b8 on C=32 → 4×8 idx + 8 b norm = 40 b/vector (int4 = 128+).
     /// FAST-PATH ONLY (same precedent as `pq`; candle stays for parity A/B of non-PQ paths).
     pub shift_pq: Option<std::sync::Arc<PqCodebook>>,
+    /// RWKV_SHIFT_ROT=<file>: LEARNED per-role orthogonal pre-rotation for the shift PQ (SpinQuant
+    /// adapted to product quantization — moves cross-chunk correlation the product codebooks can't
+    /// express). File: line1 `C`, then 2 role blocks (0=t, 1=c) of C rows x C floats (row-major R).
+    /// Applied rotate -> encode_decode -> unrotate; norms are rotation-invariant. Global, amortized.
+    pub shift_rot: Option<std::sync::Arc<Vec<f32>>>,
+}
+
+/// Apply the shift pre-rotation in place: y = R x (forward) or x = R^T y (transpose). `rot` is one
+/// role's row-major C x C block. Small C (32): a plain O(C^2) loop is fine on the replay path.
+pub(crate) fn rot_apply(rot: &[f32], x: &mut [f32], transpose: bool) {
+    let c = x.len();
+    let mut y = vec![0f32; c];
+    for (i, yi) in y.iter_mut().enumerate() {
+        let mut s = 0f32;
+        for j in 0..c {
+            s += if transpose { rot[j * c + i] } else { rot[i * c + j] } * x[j];
+        }
+        *yi = s;
+    }
+    x.copy_from_slice(&y);
 }
 
 /// Batched state quant: t is (B,H,K,K); compute a PER-CARD (per leading-B) per-tensor amax so each
@@ -929,6 +949,20 @@ impl Model {
             }
             std::sync::Arc::new(cb)
         });
+        // RWKV_SHIFT_ROT=<file>: learned per-role orthogonal pre-rotation for the shift PQ.
+        // File: line1 `C`, then 2 role blocks of C rows x C floats. See CompressCfg docs.
+        let shift_rot = std::env::var("RWKV_SHIFT_ROT").ok().filter(|s| !s.is_empty()).map(|path| {
+            let txt = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read RWKV_SHIFT_ROT '{path}': {e}"));
+            let mut it = txt.split_whitespace();
+            let rc: usize = it.next().and_then(|t| t.parse().ok())
+                .unwrap_or_else(|| panic!("RWKV_SHIFT_ROT '{path}': bad header"));
+            assert_eq!(rc, c, "RWKV_SHIFT_ROT dim {rc} != model C {c}");
+            let vals: Vec<f32> = it.map(|t| t.parse::<f32>()
+                .unwrap_or_else(|e| panic!("RWKV_SHIFT_ROT '{path}': bad float: {e}"))).collect();
+            assert_eq!(vals.len(), 2 * c * c, "RWKV_SHIFT_ROT '{path}': want {} floats", 2 * c * c);
+            std::sync::Arc::new(vals)
+        });
         // Pre-transpose every 2D linear weight (out,in) -> (in,out) contiguous ONCE, so the
         // per-token matmul needs no .t() / re-contiguous. Norm weights are 1D and skipped.
         let mut lin_wt: TMap = HashMap::new();
@@ -957,6 +991,7 @@ impl Model {
             pq,
             ef_pq,
             shift_pq,
+            shift_rot,
         };
         let fast = crate::fast::FastModel::build(
             &w, &lin_wt, c, h, k, stream_layers.clone(), num_curves, num_points,
