@@ -7,6 +7,10 @@ recall-prediction accuracy**, measured by **real log-loss** — not by any recon
 CPU-only. Everything you need is in this folder. You do NOT touch the parent project
 (`../rwkv-anki-autoresearch`) — a winning scheme gets ported back there by its owner.
 
+**Compaction timing (soft rule, Andrew 2026-07-05): compact at ~50–70% context fullness** — long-context
+rot degrades quality well before hard limits. But NOT mid-task: finish the current unit of work (verdict
+recorded, build landed, chain launched), request compaction at that seam, then continue.
+
 ## ★ TRANSITION COMPLETE (2026-06-30) — read first. New phase log = `research_log_h2k16.md`.
 
 The parent repo changed the model + dataset; this is now the active setup:
