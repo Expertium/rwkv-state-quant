@@ -313,6 +313,13 @@ __device__ float g_pq_cb[8192];
 __constant__ float c_nq_levels = 0.f;
 __constant__ float c_nq_lo = 0.f;
 __constant__ float c_nq_hi = 0.f;
+// ---- LEARNABLE WKV codebook (RWKV_QAT_PQ_LEARN): when c_pq_learn=1 the lr backward kernel accumulates
+// dL/d(centroid) into g_pq_cb_grad via atomicAdd (order nondeterministic ~1e-7). The chunk re-run records
+// each step's selected centroid indices + quantized norms; at the STE consumption point the contrib
+// gradient dL/dQ_t is outer-product-reduced against the counterpart factor. Python fetches the buffer
+// into the codebook Parameter's .grad each step and re-uploads the stepped codebook. ----
+__constant__ int c_pq_learn = 0;
+__device__ float g_pq_cb_grad[8192];
 
 // Quantize a factor norm exactly like engine encode_decode: t -> round (HALF-AWAY, matches Rust
 // f32::round) -> clamp -> exp2. Caller guarantees norm is finite and >= 1e-20.
@@ -355,8 +362,11 @@ __device__ inline void pq_encode_decode(int role, float* col, int K) {
 // fast path + quant_factor_percol_inplace). The whole block cooperates on ONE KxK matrix: `a_val` is this
 // thread's entry (x=threadIdx.y row, y=threadIdx.x col), the K vector ops run on lanes tid<K, and the
 // return value is this thread's rank-1 reconstruction entry recon[x][y] = uf_q[x]*vf_q[y]. HALF-AWAY
-// rounding (roundf) to match Rust f64::round. All threads call it (it has __syncthreads inside). ----
-__device__ inline float qat_lr_rank1(float a_val, int K, float qmax) {
+// rounding (roundf) to match Rust f64::round. All threads call it (it has __syncthreads inside).
+// rec_idx/rec_norm (nullable): learnable-codebook recording — the PQ branch writes the 2m selected
+// centroid indices (rec_idx[role*m+p], -1 = column not quantized) and the 2 reconstruction norms. ----
+__device__ inline float qat_lr_rank1(float a_val, int K, float qmax, int* rec_idx = nullptr,
+                                     float* rec_norm = nullptr) {
     const int x = threadIdx.y, y = threadIdx.x;
     const int tid = x * blockDim.x + y;
     const int nthreads = blockDim.x * blockDim.y;
@@ -458,11 +468,16 @@ __device__ inline float qat_lr_rank1(float a_val, int K, float qmax) {
         // bit-identical: per-distance FMA order unchanged, and the (dist, index) reduction keeps the
         // FIRST strict minimum exactly like the serial "d < bestd" scan -- ties resolve to the lower c,
         // all-NaN/inf distance sets fall back to centroid 0 just like the serial init best=0).
+        if (rec_idx != nullptr && tid == 0) {                  // learnable-cb recording: default -1/0
+            for (int i = 0; i < 2 * c_pq_m; i++) rec_idx[i] = -1;
+            rec_norm[0] = 0.f; rec_norm[1] = 0.f;
+        }
         for (int role = 0; role < 2; role++) {
             float norm = (role == 0) ? sc_nu : sc_nv;
             if (!isfinite(norm) || norm < 1e-20f) continue;    // mirror the early return (block-uniform)
             float inv = 1.0f / norm;                           // matching by the TRUE norm (engine parity)
             if (c_nq_levels > 0.f) norm = nq_quant_norm(norm); // reconstruct with the quantized norm
+            if (rec_norm != nullptr && tid == 0) rec_norm[role] = norm;
             float* col = (role == 0) ? ufq : vfq;
             for (int p = 0; p < c_pq_m; p++) {
                 int s = p * c_pq_subdim;
@@ -488,6 +503,7 @@ __device__ inline float qat_lr_rank1(float a_val, int K, float qmax) {
                         if (red[i] < fd || (red[i] == fd && s_bidx[i] < fi)) { fd = red[i]; fi = s_bidx[i]; }
                     }
                     sc_best = (fi == 0x7fffffff) ? 0 : fi;
+                    if (rec_idx != nullptr) rec_idx[role * c_pq_m + p] = sc_best;
                 }
                 __syncthreads();
                 if (tid < c_pq_subdim) col[s + tid] = cents[sc_best * c_pq_subdim + tid] * norm;
@@ -869,6 +885,12 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
     __shared__ float KK_grad_decay[32 * (32 + 1)];
     __shared__ float K_k_deformed[32];
     __shared__ float K_a[32];
+    // learnable WKV cb (c_pq_learn): per-step recorded centroid picks + recon norms from the chunk
+    // re-run, a staging tile for dL/dQ_t and the step's reconstructed factors (see grad block below).
+    __shared__ int rec_idx_chunk[CHUNK_LEN * 8];
+    __shared__ float rec_norm_chunk[CHUNK_LEN * 2];
+    __shared__ float KK_G[32 * (32 + 1)];
+    __shared__ float K_ufq[32], K_vfq[32];
     float state_xy_chunk[CHUNK_LEN];
     float state_prev_xy_chunk[CHUNK_LEN];
     const int b = blockIdx.x;
@@ -912,12 +934,15 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
             if (skip) {                                    // skip-step elision (see forward kernel): the
                 state_xy = in_state_xy;                    // truncation of a reverted state is unused
             } else {
-                state_xy = qat_lr_rank1(state_xy, K, qmax); // re-apply truncation (block-uniform branch)
+                state_xy = qat_lr_rank1(state_xy, K, qmax, // re-apply truncation (block-uniform branch)
+                    c_pq_learn ? &rec_idx_chunk[c * 8] : nullptr,
+                    c_pq_learn ? &rec_norm_chunk[c * 2] : nullptr);
             }
         }
 
         for (int t = std::min(T - 1, (l + 1) * CHUNK_LEN - 1); t >= l * CHUNK_LEN; t--) {
             int c = t - l * CHUNK_LEN;
+            float G_xy = 0.f;                              // dL/dQ_t at the STE consumption (cb grads)
             float state_xy = state_xy_chunk[c];
             KK_state[get_index1(x, y, K+1)] = state_xy;
             KK_state_prev[get_index1(x, y, K+1)] = state_prev_xy_chunk[c];
@@ -936,6 +961,7 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
             float grad_y = to_float<F>(grad_BTHK[global_y]);
             float dS_xy = grad_x * r_y;
             if (!skip) {
+                G_xy = dS_xy_contrib;                  // dL/dQ_t: Q_t was consumed by later steps
                 dS_xy += dS_xy_contrib;
                 dS_xy_contrib = 0.0;
             }
@@ -993,6 +1019,35 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
             dS_xy_remove = __shfl_sync(FULL_MASK, dS_xy_remove, 0, K);
             dS_xy_contrib += dS_xy_decay - dS_xy_remove * k_deformed_y;
             __syncthreads();
+            // ---- learnable-cb grads: dL/dcent_u[p][ci][j] = norm_u * sum_y G[s+j][y]*vfq[y] (v symm.).
+            // Q_t = ufq (x) vfq was consumed at this !skip step (G_xy captured above); its centroid
+            // selections + recon norms were recorded during the chunk re-run. atomicAdd accumulation
+            // into g_pq_cb_grad (float add order nondeterministic, ~1e-7 jitter). ----
+            if (c_pq_learn && c_pq_active && !skip) {
+                KK_G[get_index1(x, y, K + 1)] = G_xy;
+                if (x == 0 && y < K) {                 // reconstruct step-t factors from the recording
+                    int p = y / c_pq_subdim, j = y - p * c_pq_subdim;
+                    int ciu = rec_idx_chunk[c * 8 + p];
+                    int civ = rec_idx_chunk[c * 8 + c_pq_m + p];
+                    K_ufq[y] = (ciu >= 0) ? g_pq_cb[(p * c_pq_ncent + ciu) * c_pq_subdim + j] * rec_norm_chunk[c * 2] : 0.f;
+                    K_vfq[y] = (civ >= 0) ? g_pq_cb[((c_pq_m + p) * c_pq_ncent + civ) * c_pq_subdim + j] * rec_norm_chunk[c * 2 + 1] : 0.f;
+                }
+                __syncthreads();
+                float gu = KK_G[get_index1(x, y, K + 1)] * K_vfq[y];  // row x: sum_y G[x][y]*vfq[y]
+                float gv = KK_G[get_index1(y, x, K + 1)] * K_ufq[y];  // col x: sum_row G[row][x]*ufq[row]
+                for (int o = K / 2; o > 0; o >>= 1) {
+                    gu += __shfl_down_sync(FULL_MASK, gu, o, K);
+                    gv += __shfl_down_sync(FULL_MASK, gv, o, K);
+                }
+                if (y == 0) {
+                    int p = x / c_pq_subdim, j = x - p * c_pq_subdim;
+                    int ciu = rec_idx_chunk[c * 8 + p];
+                    int civ = rec_idx_chunk[c * 8 + c_pq_m + p];
+                    if (ciu >= 0) atomicAdd(&g_pq_cb_grad[(p * c_pq_ncent + ciu) * c_pq_subdim + j], rec_norm_chunk[c * 2] * gu);
+                    if (civ >= 0) atomicAdd(&g_pq_cb_grad[((c_pq_m + p) * c_pq_ncent + civ) * c_pq_subdim + j], rec_norm_chunk[c * 2 + 1] * gv);
+                }
+                __syncthreads();                       // KK_G/K_ufq/K_vfq reuse fence for the next t
+            }
         }
     }
 }
@@ -1012,9 +1067,12 @@ at::Tensor rwkv7_lr_trunc_test_cuda(const at::Tensor& state_BHKK, double qmax) {
 // Upload the rank-1 PQ codebook (roles 0,1) to the device globals; m<=0 disables PQ (qat_lr_rank1 reverts
 // to its int-N path). cb_flat = float[2*m*ncent*sub] in layout ((role*m+p)*ncent+c)*sub+j (roles 0=u,1=v).
 // Called ONCE before a PQ-QAT run. Not templated (global state), registered as a plain CUDA op.
+static int h_pq_m = 0, h_pq_sub = 0, h_pq_ncent = 0;   // host mirror of the uploaded codebook shape
+
 void rwkv7_set_pq_codebook_cuda(const at::Tensor& cb_flat, int64_t m, int64_t sub, int64_t ncent) {
     int active = (m > 0) ? 1 : 0;
     int mi = (int)m, si = (int)sub, ni = (int)ncent;
+    h_pq_m = mi; h_pq_sub = si; h_pq_ncent = ni;
     cudaMemcpyToSymbol(c_pq_active, &active, sizeof(int));
     cudaMemcpyToSymbol(c_pq_m, &mi, sizeof(int));
     cudaMemcpyToSymbol(c_pq_subdim, &si, sizeof(int));
@@ -1039,6 +1097,29 @@ void rwkv7_set_norm_quant_cuda(const at::Tensor& dev, int64_t bits, double lo_lo
     cudaMemcpyToSymbol(c_nq_lo, &lo, sizeof(float));
     cudaMemcpyToSymbol(c_nq_hi, &hi, sizeof(float));
     cudaDeviceSynchronize();
+}
+
+// Learnable-codebook control (RWKV_QAT_PQ_LEARN). `dev` = dispatch anchor (any CUDA tensor).
+void rwkv7_set_pq_learn_cuda(const at::Tensor& dev, int64_t on) {
+    int v = on ? 1 : 0;
+    cudaMemcpyToSymbol(c_pq_learn, &v, sizeof(int));
+    cudaDeviceSynchronize();
+}
+
+// Zero the centroid-gradient accumulator. Call once per optimizer step BEFORE the backward pass(es).
+void rwkv7_pq_cb_grad_zero_cuda(const at::Tensor& dev) {
+    void* addr = nullptr;
+    cudaGetSymbolAddress(&addr, g_pq_cb_grad);
+    cudaMemsetAsync(addr, 0, sizeof(float) * 8192);
+}
+
+// Fetch the accumulated centroid grads (roles 0,1 layout = g_pq_cb) as a CUDA float tensor.
+at::Tensor rwkv7_pq_cb_grad_get_cuda(const at::Tensor& dev) {
+    int n = 2 * h_pq_m * h_pq_ncent * h_pq_sub;
+    TORCH_CHECK(n > 0, "pq_cb_grad_get: no codebook uploaded");
+    at::Tensor out = torch::empty({n}, torch::dtype(torch::kFloat32).device(dev.device()));
+    cudaMemcpyFromSymbol(out.data_ptr<float>(), g_pq_cb_grad, n * sizeof(float), 0, cudaMemcpyDeviceToDevice);
+    return out;
 }
 
 template <int CHUNK_LEN=32, typename F>
@@ -1337,5 +1418,8 @@ TORCH_LIBRARY_IMPL(rwkv, CUDA, m) {
     m.impl("rwkv7_wkv_qat_lr_backward_float", &rwkv7_wkv_qat_lr_backward_cuda<CHECKPOINT_LEN, float>);
     m.impl("rwkv7_set_pq_codebook", &rwkv7_set_pq_codebook_cuda);
     m.impl("rwkv7_set_norm_quant", &rwkv7_set_norm_quant_cuda);
+    m.impl("rwkv7_set_pq_learn", &rwkv7_set_pq_learn_cuda);
+    m.impl("rwkv7_pq_cb_grad_zero", &rwkv7_pq_cb_grad_zero_cuda);
+    m.impl("rwkv7_pq_cb_grad_get", &rwkv7_pq_cb_grad_get_cuda);
 }
 }

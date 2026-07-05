@@ -54,5 +54,9 @@ namespace rwkv {
         // Norm quant for the PQ branch (engine RWKV_PQ_NORM_BITS analog); bits<=0 disables. Global state.
         // `dev` is a dummy CUDA tensor: tensor-less ops can't dispatch to the CUDA-only impl.
         m.def("rwkv7_set_norm_quant(Tensor dev, int bits, float lo_log2, float hi_log2) -> ()");
+        // Learnable WKV codebook (RWKV_QAT_PQ_LEARN): enable flag, per-step grad zero + fetch. Global state.
+        m.def("rwkv7_set_pq_learn(Tensor dev, int on) -> ()");
+        m.def("rwkv7_pq_cb_grad_zero(Tensor dev) -> ()");
+        m.def("rwkv7_pq_cb_grad_get(Tensor dev) -> Tensor");
     }
 }

@@ -426,6 +426,17 @@ def main_loop(config, task_queue, batch_queue):
             {"params": [_shift_cb_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
         )
         print(f"[shift-pq] codebook LEARNABLE: {tuple(_shift_cb_param.shape)} added as optim group (wd=0)")
+    # WKV-PQ learnable codebook (RWKV_QAT_PQ_LEARN=1): same treatment. Grads do NOT arrive via autograd —
+    # the lr backward kernel accumulates them in a device buffer; the loop below zeroes it before backward
+    # and fetches it into .grad after, then re-uploads the stepped centroids to the kernel globals.
+    _wkv_cb_param = None
+    if os.environ.get("RWKV_QAT_PQ", "") and os.environ.get("RWKV_QAT_PQ_LEARN", "") == "1":
+        from rwkv.model import rwkv_ops as _rwkv_ops_mod
+        _wkv_cb_param = _rwkv_ops_mod.wkv_pq_cb_param()
+        optimizer.add_param_group(
+            {"params": [_wkv_cb_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
+        )
+        print(f"[wkv-pq] codebook LEARNABLE: {tuple(_wkv_cb_param.shape)} added as optim group (wd=0)")
 
     num_trainable_parameters = get_number_of_trainable_parameters(model)
     print(f"Trainable parameters: {num_trainable_parameters}")
@@ -584,8 +595,13 @@ def main_loop(config, task_queue, batch_queue):
                     f"{epoch_i} {group_i} {step}, all: {stats.average_loss.item():3f}, ahead: {stats.ahead_avg.item():.4f} ({stats.ahead_raw_avg.item():.4f}), imm: {stats.imm_avg.item():.3f}"
                 )
                 log["train_nan"] = 0
+                if _wkv_cb_param is not None:
+                    from rwkv.model import rwkv_ops as _rwkv_ops_mod
+                    _rwkv_ops_mod.wkv_pq_grad_zero()
                 stats.average_loss.backward()
                 transfer_child_grad_to_master(master=master_model, child=model)
+                if _wkv_cb_param is not None:
+                    _rwkv_ops_mod.wkv_pq_grad_fetch()
 
                 if validate_iter and config.USE_WANDB:
                     log_model(log, master_model)
@@ -611,9 +627,13 @@ def main_loop(config, task_queue, batch_queue):
                 _clip_params = list(master_model.parameters())
                 if _shift_cb_param is not None:
                     _clip_params.append(_shift_cb_param)
+                if _wkv_cb_param is not None:
+                    _clip_params.append(_wkv_cb_param)
                 total_norm = torch.nn.utils.clip_grad_norm_(_clip_params, CLIP)
                 if torch.isfinite(total_norm):
                     optimizer.step()
+                    if _wkv_cb_param is not None:  # push stepped centroids to the kernel globals
+                        _rwkv_ops_mod.wkv_pq_reupload()
                 else:
                     print("Non-finite grad norm; skipping optimizer step (weights protected).")
                     log["train_nan"] = 1
@@ -649,6 +669,11 @@ def main_loop(config, task_queue, batch_queue):
                     from rwkv.model import rwkv_model as _rwkv_model_mod
                     _rwkv_model_mod.shift_pq_export(
                         f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_shiftcb_{step}.txt"
+                    )
+                if _wkv_cb_param is not None:  # export the LEARNED WKV codebook (engine text format)
+                    from rwkv.model import rwkv_ops as _rwkv_ops_mod2
+                    _rwkv_ops_mod2.wkv_pq_export(
+                        f"{config.SAVE_MODEL_FOLDER}/{config.SAVE_MODEL_PREFIX}_wkvcb_{step}.txt"
                     )
                 print("MODEL SAVED.")
                 elapsed = time.time() - group_start
