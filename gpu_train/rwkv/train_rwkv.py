@@ -459,6 +459,13 @@ def main_loop(config, task_queue, batch_queue):
             {"params": [_shift_rot_param], "lr": config.PEAK_LR, "weight_decay": 0.0}
         )
         print(f"[shift-rot] learned pre-rotation: {tuple(_shift_rot_param.shape)} added as optim group (wd=0)")
+    # Soft-to-hard selection annealing (RWKV_QAT_SHIFT_ANNEAL=<tau0>): per-step temperature schedule,
+    # linear tau0 -> 0 at RWKV_QAT_SHIFT_ANNEAL_END of training, exactly-hard thereafter (no end gap).
+    _rm_anneal = None
+    if os.environ.get("RWKV_QAT_SHIFT_PQ", "") and float(os.environ.get("RWKV_QAT_SHIFT_ANNEAL", "0") or 0) > 0:
+        from rwkv.model import rwkv_model as _rm_anneal
+        print(f"[shift-anneal] soft-to-hard selection annealing ON: tau0={_rm_anneal._SHIFT_ANNEAL_TAU0} "
+              f"-> fully HARD from {_rm_anneal._SHIFT_ANNEAL_END:.0%} of training")
     # WKV-PQ learnable codebook (RWKV_QAT_PQ_LEARN=1): same treatment. Grads do NOT arrive via autograd —
     # the lr backward kernel accumulates them in a device buffer; the loop below zeroes it before backward
     # and fetches it into .grad after, then re-uploads the stepped centroids to the kernel globals.
@@ -647,6 +654,8 @@ def main_loop(config, task_queue, batch_queue):
             log = {}
             log["step"] = step
             log["lr"] = optimizer.param_groups[0]["lr"]
+            if _rm_anneal is not None:
+                _rm_anneal.set_shift_anneal_progress(step / total_steps)
 
             keys = str(groups[group_i])
             print(f"\n{keys}")

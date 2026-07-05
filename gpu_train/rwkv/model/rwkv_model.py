@@ -123,6 +123,27 @@ _SHIFT_ROT_LEARN = _SHIFT_ROT_ENV == "1"
 _SHIFT_ROT_P = None      # Parameter [2, C, C] (the unconstrained Cayley pre-image), or None
 _SHIFT_ROT_FIXED = None  # [2, C, C] orthogonal R loaded from a file (eval: RWKV_QAT_SHIFT_ROT=<path>)
 
+# RWKV_QAT_SHIFT_ANNEAL=<tau0>: SOFT-TO-HARD selection annealing for the shift PQ (soft-to-hard vector
+# quantization, Agustsson et al. 2017, adapted). For the early fraction of training the hard nearest-
+# centroid snap is replaced by a fully differentiable softmax(-d^2/tau) blend over each chunk's
+# centroids — gradients reach x, the codebook AND the rotation through the ASSIGNMENT itself, so
+# centroids and weights co-adapt without frozen-selection noise. tau decays LINEARLY from tau0 to 0 at
+# frac = RWKV_QAT_SHIFT_ANNEAL_END (default 0.5) of total steps; from that point the path is EXACTLY
+# the hard deploy quantizer for the entire remainder — no soft/hard gap after training ends (Andrew's
+# condition). Driven per-step by set_shift_anneal_progress from train_rwkv; tau stays 0 (hard) in any
+# process that never calls it (gpu_eval, parity scripts). Soft path only runs with grad enabled, so
+# in-training no_grad validation passes always see the deploy-exact hard quantizer.
+_SHIFT_ANNEAL_TAU0 = float(os.environ.get("RWKV_QAT_SHIFT_ANNEAL", "0") or 0)
+_SHIFT_ANNEAL_END = float(os.environ.get("RWKV_QAT_SHIFT_ANNEAL_END", "0.5") or 0.5)
+_SHIFT_ANNEAL_TAU = 0.0
+
+
+def set_shift_anneal_progress(frac):
+    """Train-loop hook: frac = step/total_steps -> sets the current soft-selection temperature."""
+    global _SHIFT_ANNEAL_TAU
+    _SHIFT_ANNEAL_TAU = _SHIFT_ANNEAL_TAU0 * max(0.0, 1.0 - frac / _SHIFT_ANNEAL_END)
+    return _SHIFT_ANNEAL_TAU
+
 
 def shift_rot_init(device, c):
     """Create the rotation Parameter (idempotent). Call BEFORE optimizer.add_param_group."""
@@ -213,6 +234,23 @@ def fake_pq_shift(x_BTC: torch.Tensor, role: int) -> torch.Tensor:
     B, T, C = x_BTC.shape
     flat = x_BTC.reshape(-1, C).float()
     rot = _shift_rot_matrix(role)                                      # None unless RWKV_QAT_SHIFT_ROT=1
+    tau = _SHIFT_ANNEAL_TAU
+    if tau > 0.0 and torch.is_grad_enabled():
+        # SOFT phase (RWKV_QAT_SHIFT_ANNEAL): everything differentiable, no STE. Note rot is NOT
+        # detached on the encode side here — R gets assignment gradients too.
+        work = flat if rot is None else flat @ rot.T
+        norm = work.norm(dim=1, keepdim=True)
+        ok = (norm.squeeze(1) > 1e-20).detach()
+        unit = work / norm.clamp_min(1e-20)
+        if _NORM_BITS:
+            norm = norm + (_nq_quant_norm(norm) - norm).detach()       # STE on the norm rounding only
+        parts = [torch.softmax(-torch.cdist(unit[:, p * sub:(p + 1) * sub], cb[role, p]).square() / tau,
+                               dim=1) @ cb[role, p] for p in range(m)]
+        q = torch.cat(parts, dim=1) * norm
+        if rot is not None:
+            q = q @ rot
+        q = torch.where(ok.unsqueeze(1), q, flat)
+        return q.reshape(B, T, C).to(x_BTC.dtype)
     with torch.no_grad():
         work = flat if rot is None else flat @ rot.T.detach()          # encode in the ROTATED basis
         norm = work.norm(dim=1, keepdim=True)                          # (= ||flat||: R is orthogonal)
