@@ -118,8 +118,10 @@ def _nq_quant_norm(norm):
 # across the chunk boundary — the one lever untested against the m4b5 capacity wall. Norms are
 # rotation-invariant, so the norm path (incl. _NORM_BITS) is untouched. Deploy: engine RWKV_SHIFT_ROT
 # loads the exported matrices and mirrors rotate -> encode_decode -> unrotate.
-_SHIFT_ROT_LEARN = os.environ.get("RWKV_QAT_SHIFT_ROT", "") == "1"
-_SHIFT_ROT_P = None  # Parameter [2, C, C] (the unconstrained Cayley pre-image), or None
+_SHIFT_ROT_ENV = os.environ.get("RWKV_QAT_SHIFT_ROT", "")
+_SHIFT_ROT_LEARN = _SHIFT_ROT_ENV == "1"
+_SHIFT_ROT_P = None      # Parameter [2, C, C] (the unconstrained Cayley pre-image), or None
+_SHIFT_ROT_FIXED = None  # [2, C, C] orthogonal R loaded from a file (eval: RWKV_QAT_SHIFT_ROT=<path>)
 
 
 def shift_rot_init(device, c):
@@ -131,8 +133,26 @@ def shift_rot_init(device, c):
     return _SHIFT_ROT_P
 
 
+def _shift_rot_load(device):
+    """Eval path: RWKV_QAT_SHIFT_ROT=<file> loads the EXPORTED orthogonal matrices directly (the
+    trained Parameter lives outside the checkpoint; evals replay the exported engine-format file)."""
+    global _SHIFT_ROT_FIXED
+    if _SHIFT_ROT_FIXED is None:
+        vals = []
+        with open(_SHIFT_ROT_ENV) as fh:
+            toks = fh.read().split()
+        c = int(toks[0])
+        vals = [float(x) for x in toks[1:]]
+        assert len(vals) == 2 * c * c, f"shift rot file: want {2*c*c} floats, got {len(vals)}"
+        _SHIFT_ROT_FIXED = torch.tensor(vals, dtype=torch.float32).view(2, c, c).to(device)
+        print(f"[QAT-SHIFT-ROT] loaded FIXED rotation from {_SHIFT_ROT_ENV}: 2 x {c}x{c}")
+    return _SHIFT_ROT_FIXED
+
+
 def _shift_rot_matrix(role):
     """The orthogonal R for `role`, differentiable w.r.t. _SHIFT_ROT_P. None when the lever is off."""
+    if _SHIFT_ROT_ENV and not _SHIFT_ROT_LEARN and os.path.isfile(_SHIFT_ROT_ENV):
+        return _shift_rot_load("cpu" if _SHIFT_PQ_CB is None else _SHIFT_PQ_CB.device)[role]
     if _SHIFT_ROT_P is None:
         return None
     p = _SHIFT_ROT_P[role]
