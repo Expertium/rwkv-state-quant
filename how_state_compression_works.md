@@ -1,5 +1,5 @@
-# How the WKV state gets squeezed from 2.25 KB to 352 bits
-### The five levels of compression used in this project, for a STEM reader who hasn't done quantization
+# How the WKV state gets squeezed from 2.25 KB to 80 bits
+### The nine levels of compression used in this project, for a STEM reader who hasn't done quantization
 
 This note explains, from the ground up, how this project compresses an RWKV-7 recurrent "WKV state"
 for storage. It assumes you're comfortable with vectors and matrices (we recap the **SVD** in a short
@@ -16,11 +16,13 @@ The network keeps a little memory matrix for **every flashcard** (and every note
 one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit floats, plus two 32-number
 "token-shift" vectors (explained in their own section below). Raw size, counted exactly:
 `(2×16×16 + 2×32) × 32 bits = 18,432 bits = 2.25 KB` per card. A power user has ~1,000,000 cards, so
-raw states are gigabytes. The final scheme stores each card in **352 bits** — a **52×** reduction —
-while predicting recall *essentially as well as the uncompressed model*: log-loss degradation
-**+0.0010** on the immediate-recall head, **−0.0003** on the forgetting-curve head (yes, negative —
-on that head the compressed model predicts marginally *better* than the uncompressed one; the QAT
-section explains how that is possible). The rest of this note climbs the five levels that get there.
+raw states are gigabytes. The current best scheme stores each card in **80 bits — ten bytes, a 230×
+reduction** — at a log-loss degradation of **+0.0023 / +0.0006** (immediate-recall head /
+forgetting-curve head), inside the project's ≤ +0.0025 acceptance gate. An earlier milestone on the
+way, the 352-bit card, is even *cheaper* than free on one head: **+0.0010 / −0.0003** (yes, negative —
+that compressed model predicts marginally *better* than the uncompressed one on the forgetting-curve
+head; the QAT section explains how that is possible). The rest of this note climbs the nine levels
+that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take the same card down to 80 bits.
 
 ---
 
@@ -245,11 +247,13 @@ SVD/low-rank/PQ to exploit. They get the Level 1–2 treatment: **int4 codes wit
 vector**. Counted exactly: 2 vectors × 32 values × 4 bits = **256 bits** of codes, plus 2 per-vector
 scales.
 
-**Why int4 and not fewer.** This was measured, and it's the sharpest empirical fact about the shifts:
-they are *more* quantization-sensitive than the WKV matrices. Taking the shifts to int3 costs ~+0.0004
-imm log-loss even with QAT; int2 is catastrophic (+0.0041/+0.0024 on top of the scheme). The sub-512-bit
+**Why int4 and not fewer — in the 352-bit era.** This was measured, and it was the sharpest empirical
+fact of the first descent: shifts are *more* quantization-sensitive than the WKV matrices. Taking the
+shifts to int3 costs ~+0.0004 imm log-loss even with QAT; int2 is nearly catastrophic. The sub-512-bit
 exploration concluded "token-shifts are the binding wall": the WKV side could be squeezed all the way
-down to PQ catalog numbers, but the shifts stay at int4.
+down to PQ catalog numbers, but *integer-grid* coding of the shifts stalls at int4. (Foreshadowing:
+Level 7 eventually breaks this wall by giving the shifts the same catalog treatment as the WKV
+directions — the wall was a property of integer grids, not of the shifts themselves.)
 
 ---
 
@@ -348,7 +352,7 @@ flipped (before encoding) so that `u`'s largest-magnitude entry is positive. All
 the same "hemisphere", so no catalog entries are wasted on mirror images — effectively doubling
 resolution for free.
 
-### 5e. The final 352-bit card, counted exactly
+### 5e. The 352-bit card, counted exactly (the first PQ champion — Levels 6–9 shrink it further)
 
 | piece | how | bits |
 |---|---|---|
@@ -369,6 +373,145 @@ scalar at int8, the strict total is 352 + 2×8 = **368 bits**. The 4 direction n
 (at 8 bits each) because they are the magnitude payload of the PQ scheme itself. One more honesty
 note: the evaluation engine holds these 6 scalars as floats in RAM at run time — the bit charges
 above are *storage* precision.
+
+---
+
+## Level 6 — Coarser catalogs are (nearly) free under QAT
+
+The 352-bit card uses 256-entry catalogs — 8-bit indices — chosen conservatively. The obvious
+question: how few swatches can the palette have before quality collapses? The answer turned out to be
+the single most surprising fact of the second descent:
+
+> Under QAT, shrinking the WKV catalogs from **256 entries to 8** — from 8-bit indices to **3-bit**
+> indices — costs almost nothing.
+
+Measured along the way (all with the shifts and training recipe held fixed): 256-entry catalogs at
+352 b gave +0.0010/−0.0003; **64-entry** catalogs (6-bit indices, 272 b) gave +0.0011/−0.0003 — a
+statistical tie with *the best robustness profile of any scheme tested*; **16-entry** catalogs (4-bit
+indices) carried the 256-, 192- and 144-bit rungs; **8-entry** catalogs (3-bit indices) hold the
+current 80-bit champion. Each halving of the index width moved the needle by roughly +0.0000 to
++0.0004.
+
+Why doesn't an 8-swatch palette hurt? Because QAT changes what the palette has to cover. With a
+*fixed* network, the catalog must approximate whatever directions the states happen to visit — more
+entries, better coverage. But under QAT the network is fine-tuned *through* the snap (STE), so it
+learns to **park its states near the centroids it knows exist**. The palette stops chasing the data;
+the data walks over to the palette. A side effect seen repeatedly in the numbers: the coarse snap acts
+as a mild regularizer (several coarse-catalog runs beat their own uncompressed base — negative
+compression cost).
+
+This lever is what pays for most of the 352 → 80 descent on the WKV side: 4 directions × 16 bits =
+64 b of indices at Level 5 become 4 × 6 = **24 b** at the 80-bit card.
+
+---
+
+## Level 7 — The shifts join the catalog: PQ beats int-N there too
+
+Level 6 leaves the token shifts as the dominant cost (256 of the bits — 4× the WKV payload). Recall
+the 352-era wall: integer grids on the shifts stall at int4. The hypothesis (Andrew's, stated in
+advance of the measurement): *PQ won over integer grids for the WKV directions, so the same should
+happen for the shifts.* Confirmed, decisively:
+
+- **PQ shifts at 80 bits beat int2 shifts at 128 bits** — fewer bits *and* better log-loss.
+- The deployed recipe: normalize each 32-value shift vector, chop into **m = 4 chunks of 8**, one
+  catalog per chunk position per role (the time-mix shift and the channel-mix shift get separate
+  catalogs — their distributions differ), store 4 indices + the norm. With 64-entry catalogs
+  ("m4b6"), a shift vector costs 4 × 6 = 24 bits of indices; both vectors together **48 bits** —
+  down from 256.
+
+The shifts are not unit-direction factors like the WKV case, but the same recipe applies: split off
+the magnitude (norm), catalog the direction. The k-means corpus here is ~450k real shift vectors per
+role, dumped from deployment runs.
+
+**Where the new wall is.** Halving the shift catalogs once more (32 entries, "m4b5", 40 bits) fails
+the gate: +0.0027/+0.0017 — and, crucially, it fails *identically* (+0.0027/+0.0018) even with every
+learnable lever of Level 8 engaged. That is the signature of a **capacity wall**, not an optimization
+gap: 32 swatches per chunk cannot cover the shift manifold, and no amount of training moves it.
+The shift manifold needs 64 entries per chunk. (Compare the failed 16-entry shift attempt at the
+96-bit rung: +0.0026 — same wall, one step earlier.)
+
+---
+
+## Level 8 — Learnable catalogs: the codebook joins the training
+
+The catalogs of Levels 5–7 are built by k-means on states of the *original* network — then frozen.
+But QAT fine-tunes the network away from those states; why should the old palette stay optimal?
+
+Two ways to update it were tried; only one works:
+
+1. **Post-hoc refit (dead).** Re-run k-means on the QAT'd network's own states, swap the new catalog
+   in. This *hurts* (+0.0027 vs +0.0010): the weights equilibrated to the exact catalog they trained
+   with; swapping it after the fact just breaks the agreement.
+2. **Gradient co-training (works).** Make the centroids **trainable parameters** of the QAT run
+   itself. Each step, the nearest-centroid *selection* is frozen (a hard assignment, like an
+   embedding lookup), but the *selected* centroid entries receive real gradients through the
+   reconstruction, while the state gradients pass through via STE. Selections stay hard; the swatches
+   drift to wherever the loss wants them. Measured on the shift catalog: **−0.0004 imm** vs the same
+   run with a frozen catalog, plus a better per-user profile — one of the few levers that improves
+   quality at *equal* bits.
+
+For the shift catalog this is ~30 lines of PyTorch (the shift snap lives in Python). For the WKV
+catalog the selection happens *inside the fused CUDA recurrence kernel*, so the backward kernel had
+to be taught to accumulate per-centroid gradients (recording which centroid each step selected during
+its checkpoint re-run, then reducing `∂L/∂centroid = norm × (state-gradient ⊗ other-factor)` into a
+buffer). One methodological trap worth recording: **you cannot finite-difference-check an STE
+gradient.** Perturbing a centroid and re-running the true forward measures the *true* function —
+where downstream re-quantization (hard selections, staircase norms) has zero local derivative and
+damps everything ~5–10× — so numeric and STE gradients *should* disagree. The correct reference is a
+PyTorch autograd port of the same STE semantics; against that, the kernel matched to cosine 1.000000
+/ median 1.7e-07.
+
+Honest scorecard for the WKV half of this lever: it verified exactly, trains stably, and improved the
+GPU-side readout slightly — but it did **not** rescue the 80-bit shift-route attempt (Level 7's
+capacity wall held). Learning tunes a palette; it cannot make 32 swatches paint like 64.
+
+---
+
+## Level 9 — The norms turn out to be nearly redundant
+
+The last remaining per-card payload besides the indices: the **norm scalars** (the magnitude half of
+every catalog entry — Level 5a). The 352-bit card charged 8 bits each. Two discoveries collapsed them.
+
+**9a. Half of them were duplicates all along.** The split-`√σ` trick from Level 3 (`uf = u·√σ`,
+`vf = v·√σ`) makes `‖uf‖ = ‖vf‖ = √σ` — *by construction, exactly*. The engine had been storing both.
+One norm per head suffices: 4 WKV norms are really 2. Sixteen bits of pure accounting, zero quality
+cost — found by staring at the algebra, not by any experiment.
+
+**9b. The survivors barely need bits.** Quantize each remaining norm log-uniformly (store which
+power-of-two band it falls in) over a **fixed, corpus-derived range** — the WKV `√σ` lives in
+`[2⁻³, 2⁰]`, and the shift norms are pinned by the network's layernorm into a band only 0.7 octaves
+wide. Matching still uses the exact norm (so the *selection* of catalog entries is unaffected); only
+the reconstruction magnitude is snapped. Measured, deployed on the real engine, 400 users:
+
+```
+norm bits:   5        4        3        2
+imm:      +0.0022  +0.0022  +0.0023  +0.0023     ← identical within noise
+```
+
+**Four-level norms** — for the WKV, steps a full octave apart — cost nothing. The information content
+of the state is almost entirely in the *directions* (the catalog indices); the magnitudes are nearly
+determined (layernorm pins the shifts; the recurrence's normalization concentrates `√σ`). Probes at
+1 bit and even **0 bits** (a fixed constant norm — nothing stored per card at all) are the natural
+endgame of this lever.
+
+One training-side detail made 9b deployable at the frontier: the norm snap is **modeled inside QAT**
+too (same theme as everything above — train ≈ deploy, exactly). As pure post-training quantization
+the int4 norm snap cost +0.0005 imm — enough to fail the 88-bit rung by a hair; with the snap in the
+training forward, the cost fell to ~+0.0002 and the rung passed.
+
+### The 80-bit card, counted exactly
+
+| piece | how | bits |
+|---|---|---|
+| 4 WKV direction indices | Level 6: 8-entry catalogs, 2 chunks × 3 b | 4 × 6 = **24** |
+| 2 WKV norms (deduped, 9a) | Level 9: 2-bit log₂ band | 2 × 2 = **4** |
+| 2 token-shift vectors | Level 7: 64-entry catalogs, 4 chunks × 6 b | 2 × 24 = **48** |
+| 2 shift norms | Level 9: 2-bit log₂ band | 2 × 2 = **4** |
+| **card total** | | **24 + 4 + 48 + 4 = 80** |
+
+**Ten bytes per card**; a note (3 layers) = 240 bits = 30 bytes. Against the 18,432-bit raw state:
+**230×**. Log-loss degradation +0.0023/+0.0006 — measured on the deployed Rust engine over 400
+held-out users, same per-user robustness profile as every passing rung.
 
 ---
 
@@ -430,10 +573,17 @@ Two findings made the 352-bit scheme work:
    monotonically with fine-tune length at every point measured (0.05 → 1.5 epochs, never turning
    around), to the point where the PQ-compressed model **beats its own uncompressed weights** (the
    compression acts as a familiar, trained-for representation, not an injury — and that is how the
-   final scheme manages a *negative* degradation on the forgetting-curve head: the deployed compressed
-   model ends up marginally better there than the original fp32 champion). Final numbers at 352 b:
-   PTQ +0.0046/+0.0040 → 0.1-epoch QAT +0.0043/+0.0037 → 0.75 ep +0.0021/+0.0012 → **1.5 ep
-   +0.0010/−0.0003** (the deployed recipe; confirmed on the held-out dev split, +0.0009/+0.0003).
+   352-bit scheme manages a *negative* degradation on the forgetting-curve head: the deployed
+   compressed model ends up marginally better there than the original fp32 champion). Numbers at
+   352 b: PTQ +0.0046/+0.0040 → 0.1-epoch QAT +0.0043/+0.0037 → 0.75 ep +0.0021/+0.0012 → **1.5 ep
+   +0.0010/−0.0003** (confirmed on the held-out dev split, +0.0009/+0.0003).
+
+A third rule was imposed for the second descent (Levels 6–9) and shaped it: **the fine-tune budget is
+hard-capped at 2 epochs** — quality beyond that must come from *learnable parameters* (Level 8), not
+longer training. And the "train ≈ deploy, exactly" principle kept earning: the two rungs that
+initially failed by a hair (88 b, 96 b) were exactly the ones where some deploy detail (the norm
+snap, the shift catalog size) was *not yet* modeled in the training forward; modeling the norm snap
+turned the 88-bit near-miss (+0.0026) into a pass (+0.0023).
 
 ---
 
@@ -459,19 +609,29 @@ Two findings made the 352-bit scheme work:
         ▼
   reconstruct  Â = uf·vfᵀ  →  feed back into the recurrence              (every step!)
 
-  …and separately: token-shift vectors → int4 with per-vector scales     (Levels 1–2, 256 b)
+  …and separately: token-shift vectors → normalize, PQ-encode against    (Level 7, 48 b + norms)
+  the learned shift catalogs (4 chunks × 6-bit index per vector)
 ```
+
+The bit ladder, selected rungs (all measured on 400 held-out users; gate = ≤ +0.0025 on both heads):
 
 | scheme | card bits | log-loss degradation (imm / ahead) |
 |---|---|---|
 | raw fp32 | 18,432 | 0 (reference) |
 | Level 4: rank-1 int4 + QAT | 512 | +0.0024 / +0.0021 |
-| **Level 5: rank-1 PQ + QAT, 1.5 ep (deployed)** | **352** | **+0.0010 / −0.0003** |
+| Level 5: rank-1 PQ (256-entry catalogs) + QAT | 352 | **+0.0010 / −0.0003** |
+| Level 6: 64-entry WKV catalogs + int3 shifts | 272 | +0.0011 / −0.0003 |
+| ≤ 256-bit goal (the project's founding target) | 256 | +0.0014 / −0.0001 |
+| Level 7: PQ shifts (fixed catalog) | 144 | +0.0017 / +0.0000 |
+| Level 8: + learnable shift catalog | 144 | +0.0013 / −0.0001 |
+| Levels 6+7+8+9 combined (8-entry WKV catalogs, modeled norms) | 88 | +0.0023 / +0.0006 |
+| **Level 9 endgame: 2-bit norms (current champion)** | **80** | **+0.0023 / +0.0006** |
 
-Both pass the ≤ +0.0025 gate; the 352-bit scheme is the better *and* smaller one — on the
-forgetting-curve head it edges out the uncompressed reference itself — and it is *more* robust
-per-user than the 512-bit scheme (fewer degraded users, no power-user blow-ups; the hardest users
-are the same hard users under every scheme).
+Every rung above passes the gate. Two instructive failures bracket the frontier: 32-entry shift
+catalogs (80 b via the shift route) fail at +0.0027 *even with everything learnable* — a capacity
+wall — and the 96-bit attempt via 16-entry shift catalogs failed the same way. The descent below
+88 b happened entirely on the norm axis. As of this writing, 1-bit-norm (76 b) and fixed-norm
+(72 b) probes are in flight.
 
 ---
 
@@ -487,24 +647,44 @@ are the same hard users under every scheme).
 - **Power iteration** — repeat `u ← normalize(A Aᵀ u)` to get the top direction cheaply.
 - **Low-rank (Level 3)** — store `σ·u·vᵀ` (two directions + magnitude) instead of the full matrix.
 - **Token shift** — every block blends the current activation with the *previous step's*; the two
-  32-value "previous activation" vectors per layer must therefore persist between reviews. Stored
-  int4 + one scale per vector = 256 of the 352 bits; more quant-sensitive than the WKV (int4 is the
-  floor that survives).
+  32-value "previous activation" vectors per layer must therefore persist between reviews. In the
+  352-bit era: int4 + one scale per vector (256 bits, the then-binding wall). Since Level 7: PQ
+  against learned catalogs (48 bits of indices).
 - **Level 4** — low-rank factors, int4-quantized per column: 512 b/card.
 - **PQ / product quantization (Level 5)** — chop a unit direction into chunks; replace each chunk by
   its nearest catalog entry; store the indices + the norm. Combinations multiply: two 256-entry
   catalogs cover 65,536 direction combinations.
-- **Codebook / centroid** — the fixed, global catalog of typical chunks, built once by k-means on a
-  corpus of real states; ships in the app, costs no per-card bits.
+- **Codebook / centroid** — the global catalog of typical chunks, built once by k-means on a corpus
+  of real states; ships in the app, costs no per-card bits.
 - **Sign canonicalization** — flip `(u, v)` together so u's dominant entry is positive; `u vᵀ`
   unchanged, catalog coverage doubled.
 - **PTQ vs QAT** — compress after training vs fine-tune with the exact compression in the forward pass.
 - **STE** — forward uses the snapped value, backward passes gradients through unchanged.
 - **Log-loss, not Frobenius** — judge only by recall-prediction loss; matrix distance anti-correlates.
+- **Coarse catalogs under QAT (Level 6)** — shrinking WKV catalogs 256 → 8 entries (8 → 3-bit
+  indices) is ~free once the net trains through the snap: the data walks over to the palette.
+- **Shift-PQ (Level 7)** — the shifts get the catalog treatment too; PQ at 80 b beat int2 at 128 b.
+  Separate catalogs per role (time-mix / channel-mix) and chunk position; 64 entries is the floor.
+- **Capacity wall vs optimization gap** — a scheme that fails *identically* with and without every
+  learnable lever is out of representational capacity (32-entry shift catalogs); no training fixes it.
+- **Learnable catalog (Level 8)** — centroids as trainable parameters: frozen hard selection,
+  embedding-style gradients into the selected entries. Worth −0.0004 at equal bits (shift catalog).
+  Post-hoc k-means refit is the dead version of this idea — swap-after-training hurts.
+- **Norm dedup (Level 9a)** — split-√σ factors have equal norms *by construction*; store one per
+  head, save 16 bits, cost exactly zero.
+- **Log₂ norm quant (Level 9b)** — norms stored as coarse power-of-two bands over fixed
+  corpus-derived ranges; match by true norm, reconstruct by the snapped one. 2-bit norms measure
+  identical to 5-bit: the information is in the directions, not the magnitudes.
+- **Finite differences can't check STE** — the true function's local derivative through downstream
+  re-quantization is ~zero (staircases); validate STE gradients against an autograd port of the same
+  semantics, not against numeric differentiation.
 
 ---
 
-*Grounded in the deployed code: `engine/src/model.rs` (`compress_wkv_state`, `PqCodebook`),
-`scratchpad/pq_train.py` (codebook k-means), and the QAT kernel in
-`gpu_train/rwkv/model/csrc/cuda/rwkv7_cuda.cu` (`qat_lr_rank1`). Real numbers computed by
-`scratchpad/pq_explainer_numbers.py` on a real WKV state.*
+*Grounded in the deployed code: `engine/src/model.rs` (`compress_wkv_state`, `PqCodebook`
+incl. the norm quant, `RWKV_PQ_NORM_BITS`), `scratchpad/pq_train.py` + `pq_train_shift.py`
+(catalog k-means), the QAT kernel in `gpu_train/rwkv/model/csrc/cuda/rwkv7_cuda.cu`
+(`qat_lr_rank1`, learnable-catalog gradients), and `gpu_train/rwkv/model/rwkv_model.py`
+(`fake_pq_shift`, learnable shift catalog). Real numbers computed by
+`scratchpad/pq_explainer_numbers.py` on a real WKV state; every log-loss above is a 400-user
+held-out measurement recorded in `research_log_h2k16.md`.*
