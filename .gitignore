@@ -26,3 +26,5 @@ scratchpad/corpus_coad/
 scratchpad/states.txt
 scratchpad/*.log
 scratchpad_eval*.log
+scratchpad/corpus_shift/
+scratchpad/corpus/

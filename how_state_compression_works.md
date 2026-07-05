@@ -1,4 +1,4 @@
-# How the WKV state gets squeezed from 2.25 KB to 76 bits
+# How the WKV state gets squeezed from 2.25 KB to 72 bits
 ### The nine levels of compression used in this project, explained from scratch
 
 This note explains, from the ground up, how this project compresses an RWKV-7 recurrent "WKV state"
@@ -16,13 +16,13 @@ The network keeps a little memory matrix for **every flashcard** (and every note
 one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit floats, plus two 32-number
 "token-shift" vectors (explained in their own section below). Raw size, counted exactly:
 `(2×16×16 + 2×32) × 32 bits = 18,432 bits = 2.25 KB` per card. A power user has ~1,000,000 cards, so
-raw states are gigabytes. The current best scheme stores each card in **76 bits — nine and a half
-bytes, a 242× reduction** — at a log-loss degradation of **+0.0023 / +0.0005** (immediate-recall
-head / forgetting-curve head), inside the project's ≤ +0.0025 acceptance gate. An earlier milestone on the
+raw states are gigabytes. The current best scheme stores each card in **72 bits — nine bytes, a 256×
+reduction** — at a log-loss degradation of **+0.0018 / +0.0016** (immediate-recall head /
+forgetting-curve head), inside the project's ≤ +0.0025 acceptance gate. An earlier milestone on the
 way, the 352-bit card, is even *cheaper* than free on one head: **+0.0010 / −0.0003** (yes, negative —
 that compressed model predicts marginally *better* than the uncompressed one on the forgetting-curve
 head; the QAT section explains how that is possible). The rest of this note climbs the nine levels
-that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take the same card down to 76 bits.
+that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take the same card down to 72 bits.
 
 What is that "memory matrix", concretely? Just a **grid of numbers** — 16 rows × 16 columns, 256
 ordinary decimal numbers like `0.31` and `-0.007` — that the network reads and updates every time you
@@ -616,19 +616,29 @@ too (same theme as everything above — train ≈ deploy, exactly). As pure post
 the int4 norm snap cost +0.0005 imm — enough to fail the 88-bit rung by a hair; with the snap in the
 training forward, the cost fell to ~+0.0002 and the rung passed.
 
-### The 76-bit card, counted exactly
+### The 72-bit card, counted exactly
+
+One last twist first. All the rungs above chop each 16-entry WKV direction into 2 chunks with
+separate catalogs (the "product" trick of Level 5b). That trick exists because a whole-vector
+catalog would need to be enormous — for a *big* vector. But 16 dimensions with 32 entries is not
+enormous, and a single **joint** catalog over the whole direction can capture patterns *between*
+the halves that two independent chunk catalogs cannot (the halves of real directions are
+correlated; the product form is blind to that). Measured: one 32-entry joint catalog (5 bits per
+direction) beats the two 8-entry chunk catalogs (6 bits per direction) on BOTH quality and size —
++0.0018 vs +0.0023 imm. Chunking is a compromise for high dimensions, and at 16 dimensions it
+turns out we didn't need the compromise.
 
 | piece | how | bits |
 |---|---|---|
-| 4 WKV direction indices | Level 6: 8-entry catalogs, 2 chunks × 3 b | 4 × 6 = **24** |
+| 4 WKV direction indices | one 32-entry JOINT catalog per role | 4 × 5 = **20** |
 | 2 WKV norms (deduped, 9a) | Level 9: 1-bit log₂ band | 2 × 1 = **2** |
 | 2 token-shift vectors | Level 7: 64-entry catalogs, 4 chunks × 6 b | 2 × 24 = **48** |
 | 2 shift norms | Level 9: 1-bit log₂ band | 2 × 1 = **2** |
-| **card total** | | **24 + 2 + 48 + 2 = 76** |
+| **card total** | | **20 + 2 + 48 + 2 = 72** |
 
-**Nine and a half bytes per card**; a note (3 layers) = 228 bits = 28.5 bytes. Against the
-18,432-bit raw state: **242×**. Log-loss degradation +0.0023/+0.0005 — measured on the deployed
-Rust engine over 400 held-out users, same per-user robustness profile as every passing rung.
+**Nine bytes per card**; a note (3 layers) = 216 bits = 27 bytes. Against the 18,432-bit raw
+state: **256×**. Log-loss degradation +0.0018/+0.0016 — measured on the deployed Rust engine over
+400 held-out users, with the best per-user robustness profile since the 144-bit rung.
 
 ---
 
@@ -754,7 +764,8 @@ The bit ladder, selected rungs (all measured on 400 held-out users; gate = ≤ +
 | Level 7: PQ shifts (fixed catalog) | 144 | +0.0017 / +0.0000 |
 | Level 8: + learnable shift catalog | 144 | +0.0013 / −0.0001 |
 | Levels 6+7+8+9 combined (8-entry WKV catalogs, modeled norms) | 88 | +0.0023 / +0.0006 |
-| **Level 9 endgame: 1-bit norms (current champion)** | **76** | **+0.0023 / +0.0005** |
+| Level 9 endgame: 1-bit norms | 76 | +0.0023 / +0.0005 |
+| **Joint WKV catalog (current champion)** | **72** | **+0.0018 / +0.0016** |
 
 Every rung above passes the gate. Three instructive failures bracket the frontier: 32-entry shift
 catalogs (80 b via the shift route) fail at +0.0027 *even with everything learnable* — a capacity
