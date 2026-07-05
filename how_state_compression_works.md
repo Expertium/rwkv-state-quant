@@ -1,4 +1,4 @@
-# How the WKV state gets squeezed from 2.25 KB to 72 bits
+# How the WKV state gets squeezed from 2.25 KB to 64 bits
 ### The nine levels of compression used in this project, explained from scratch
 
 This note explains, from the ground up, how this project compresses an RWKV-7 recurrent "WKV state"
@@ -16,13 +16,15 @@ The network keeps a little memory matrix for **every flashcard** (and every note
 one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit floats, plus two 32-number
 "token-shift" vectors (explained in their own section below). Raw size, counted exactly:
 `(2×16×16 + 2×32) × 32 bits = 18,432 bits = 2.25 KB` per card. A power user has ~1,000,000 cards, so
-raw states are gigabytes. The current best scheme stores each card in **72 bits — nine bytes, a 256×
+raw states are gigabytes. The comfortable champion stores each card in **72 bits — nine bytes, a 256×
 reduction** — at a log-loss degradation of **+0.0018 / +0.0016** (immediate-recall head /
-forgetting-curve head), inside the project's ≤ +0.0025 acceptance gate. An earlier milestone on the
+forgetting-curve head), well inside the project's ≤ +0.0025 acceptance gate; pushing to the very
+boundary of that gate, **64 bits — one 8-byte machine word per card, 288×** — also passes, with a
+razor-thin margin (+0.002492 / +0.0012). An earlier milestone on the
 way, the 352-bit card, is even *cheaper* than free on one head: **+0.0010 / −0.0003** (yes, negative —
 that compressed model predicts marginally *better* than the uncompressed one on the forgetting-curve
 head; the QAT section explains how that is possible). The rest of this note climbs the nine levels
-that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take the same card down to 72 bits.
+that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take the same card down to 64 bits.
 
 What is that "memory matrix", concretely? Just a **grid of numbers** — 16 rows × 16 columns, 256
 ordinary decimal numbers like `0.31` and `-0.007` — that the network reads and updates every time you
@@ -517,12 +519,23 @@ of indices + the norm 5.8 (whose own fate is Level 9's story). Decoding: look up
 concatenate into a 32-number unit vector, multiply by 5.8. Both shift vectors together: **48 bits**
 of indices — where the 352-bit era spent 256.
 
-**Where the new wall is.** Halving the shift catalogs once more (32 entries, "m4b5", 40 bits) fails
-the gate: +0.0027/+0.0017 — and, crucially, it fails *identically* (+0.0027/+0.0018) even with every
-learnable lever of Level 8 engaged. That is the signature of a **capacity wall**, not an optimization
-gap: 32 swatches per chunk cannot cover the shift manifold, and no amount of training moves it.
-The shift manifold needs 64 entries per chunk. (Compare the failed 16-entry shift attempt at the
-96-bit rung: +0.0026 — same wall, one step earlier.)
+**Where the new wall is — and the trick that finally bent it.** Halving the shift catalogs once
+more (32 entries, "m4b5", 40 bits) fails the gate: +0.0027/+0.0017 — and, crucially, it fails
+*identically* (+0.0027/+0.0018) even with every learnable lever of Level 8 engaged. That is the
+signature of a **capacity wall**, not an optimization gap: 32 swatches per chunk cannot cover the
+shift manifold, and no amount of catalog training moves it.
+
+What finally bent it is the one thing chunked catalogs are structurally blind to. Chopping a vector
+into 4 independent chunks assumes the chunks don't coordinate — but real shift vectors have
+correlations *across* the chunk boundaries, and no amount of per-chunk catalog quality can encode
+those. The fix: **learn a rotation** (an orthogonal remix of the 32 coordinates — think of it as
+re-axising the space; lengths and distances are perfectly preserved) that is applied *before* the
+chop and undone after decoding. The rotation is trained jointly with everything else (initialized
+to "do nothing", it drifts to wherever the loss wants), ships as one global 32×32 matrix per role —
+amortized like the catalogs, zero per-card bits — and moves the cross-chunk structure to where the
+chunked catalogs can see it. Result: the 32-entry wall that stood at +0.0027 twice fell to
+**+0.002492** — under the gate by a whisker — buying the final 8 bits of the 64-bit card. (This is
+the "SpinQuant/QuaRot" idea from the LLM-quantization literature, adapted to product quantization.)
 
 ---
 
@@ -765,9 +778,12 @@ The bit ladder, selected rungs (all measured on 400 held-out users; gate = ≤ +
 | Level 8: + learnable shift catalog | 144 | +0.0013 / −0.0001 |
 | Levels 6+7+8+9 combined (8-entry WKV catalogs, modeled norms) | 88 | +0.0023 / +0.0006 |
 | Level 9 endgame: 1-bit norms | 76 | +0.0023 / +0.0005 |
-| **Joint WKV catalog (current champion)** | **72** | **+0.0018 / +0.0016** |
+| **Joint WKV catalog (comfortable champion)** | **72** | **+0.0018 / +0.0016** |
+| Learned rotation + 32-entry shift catalogs (boundary) | 64 | +0.002492 / +0.0012 |
 
-Every rung above passes the gate. Three instructive failures bracket the frontier: 32-entry shift
+Every rung above passes the gate — though the 64-bit rung only just: its margin is +0.000008 on
+the immediate head and its per-user profile is the tightest of the ladder (power users average
+slightly over the gate), which is why 72 bits is called the *comfortable* champion. Three instructive failures bracket the frontier: 32-entry shift
 catalogs (80 b via the shift route) fail at +0.0027 *even with everything learnable* — a capacity
 wall; the 96-bit attempt via 16-entry shift catalogs failed the same way; and **0-bit (fixed) norms
 fail decisively at +0.0064** — the norm axis bottoms out at one bit. The descent below 88 b happened
