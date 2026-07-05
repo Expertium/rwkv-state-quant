@@ -1,0 +1,24 @@
+# GPU eval: q88N (m2b3 WKV + m4b6 LEARNED-cb PQ shifts + MODELED int4 norms). With RWKV_QAT_NORM_BITS=4
+# in the run cmd this readout now covers the FULL true-88-b scheme (norms included) - first rung where
+# GPU eval == deploy bit-for-bit in structure. CPU eval on the Rust engine stays the formal verdict.
+FILE_AHEAD = "gpuval-q88N"
+FILE_IMM = "gpuval-q88N-P"
+
+MODEL_PATH = "reference/qat_pq_q88N_6702.pth"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+DATASET_LMDB_PATH = "F:/rwkv_lmdb/test_db_5k"
+DATASET_LMDB_SIZE = 250_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 40_000_000_000
+
+RAW = false
+RAW_DB_PATH = "raw/result_db"
+RAW_DB_SIZE = 3_000_000_000
+
+USER_START = 0
+USER_END = 0
+USERS_FILE = "val_users.json"
+
+NUM_FETCH_PROCESSES = 5

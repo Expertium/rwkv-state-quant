@@ -1,0 +1,38 @@
+# 88-b rung RETRY with QAT-MODELED NORM QUANT (RWKV_QAT_NORM_BITS=4): identical to qat_pq_q88L
+# (m2b3 WKV 24 b idx + m4b6 learnable shift cb 48 b idx + int4 log2 norms 16 b = 88 b/card) except the
+# int4 norm quant is now IN the training forward (WKV via CUDA op, shifts via fake_pq_shift) - the
+# q88L near-miss (+0.0026) failed by exactly the un-modeled norm tax (+0.0005).
+TRAIN_USERS_START = 1000
+TRAIN_USERS_END = 2499
+VALIDATE_USERS_START = 101
+VALIDATE_USERS_END = 110
+
+TRAIN_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/train_db_sc8k_1500"
+TRAIN_DATASET_LMDB_SIZE = 80_000_000_000
+VALIDATE_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/test_db"
+VALIDATE_DATASET_LMDB_SIZE = 8_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 2_000_000_000
+
+NUM_FETCH_PROCESSES = 4
+MAX_TRAIN_GLOBAL_LEN = 66000
+
+TRAIN_MODE = "D"
+STEP_OFFSET = 1
+WARMUP_STEPS = 0
+EPOCHS = 2.0
+VALIDATE_EVERY = 100000
+PEAK_LR = 1e-3
+
+LOAD_MODEL = true
+LOAD_MODEL_FOLDER = "reference"
+LOAD_MODEL_NAME = "h2k16d_904"
+SAVE_MODEL_FOLDER = "reference"
+SAVE_MODEL_PREFIX = "qat_pq_q88N"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+USE_WANDB = false
+WANDB_PROJECT_NAME = "rwkv"
+WANDB_RESUME = false
+WANDB_RESUME_ID = ""
