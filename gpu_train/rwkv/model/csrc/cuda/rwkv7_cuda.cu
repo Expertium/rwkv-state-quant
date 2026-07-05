@@ -307,6 +307,21 @@ __constant__ int c_pq_m = 0;
 __constant__ int c_pq_subdim = 0;
 __constant__ int c_pq_ncent = 0;
 __device__ float g_pq_cb[8192];
+// ---- NORM QUANT for the PQ branch (train==deploy analog of engine RWKV_PQ_NORM_BITS): reconstruct with
+// the factor norm quantized to n bits, log2-uniform over [c_nq_lo, c_nq_hi] octaves; centroid MATCHING
+// still uses the TRUE norm (mirrors PqCodebook::encode_decode). c_nq_levels = 2^bits - 1; 0 = off. ----
+__constant__ float c_nq_levels = 0.f;
+__constant__ float c_nq_lo = 0.f;
+__constant__ float c_nq_hi = 0.f;
+
+// Quantize a factor norm exactly like engine encode_decode: t -> round (HALF-AWAY, matches Rust
+// f32::round) -> clamp -> exp2. Caller guarantees norm is finite and >= 1e-20.
+__device__ inline float nq_quant_norm(float norm) {
+    float t = (log2f(norm) - c_nq_lo) / (c_nq_hi - c_nq_lo);
+    float q = roundf(t * c_nq_levels);
+    q = fminf(fmaxf(q, 0.f), c_nq_levels);
+    return exp2f(c_nq_lo + q / c_nq_levels * (c_nq_hi - c_nq_lo));
+}
 
 // In-place: normalize `col` (K-dim) to unit, replace each of m sub-vectors by its nearest of ncent
 // centroids, rescale by the original norm. EXACT mirror of engine model.rs PqCodebook::encode_decode.
@@ -319,6 +334,7 @@ __device__ inline void pq_encode_decode(int role, float* col, int K) {
     float norm = sqrtf(nn);
     if (!isfinite(norm) || norm < 1e-20f) return;
     float inv = 1.0f / norm;
+    if (c_nq_levels > 0.f) norm = nq_quant_norm(norm);
     int m = c_pq_m, sub = c_pq_subdim, ncent = c_pq_ncent;
     for (int p = 0; p < m; p++) {
         int s = p * sub;
@@ -445,7 +461,8 @@ __device__ inline float qat_lr_rank1(float a_val, int K, float qmax) {
         for (int role = 0; role < 2; role++) {
             float norm = (role == 0) ? sc_nu : sc_nv;
             if (!isfinite(norm) || norm < 1e-20f) continue;    // mirror the early return (block-uniform)
-            float inv = 1.0f / norm;
+            float inv = 1.0f / norm;                           // matching by the TRUE norm (engine parity)
+            if (c_nq_levels > 0.f) norm = nq_quant_norm(norm); // reconstruct with the quantized norm
             float* col = (role == 0) ? ufq : vfq;
             for (int p = 0; p < c_pq_m; p++) {
                 int s = p * c_pq_subdim;
@@ -1012,6 +1029,18 @@ void rwkv7_set_pq_codebook_cuda(const at::Tensor& cb_flat, int64_t m, int64_t su
     cudaDeviceSynchronize();
 }
 
+// Enable norm quantization in the PQ branch (bits<=0 disables). lo/hi = the fixed log2 range in octaves
+// (engine Model::load uses [-3,0] for the WKV codebook). Global state, set once before a QAT run.
+// `dev` is only a dispatch anchor (any CUDA tensor) — tensor-less schemas can't route to a CUDA impl.
+void rwkv7_set_norm_quant_cuda(const at::Tensor& dev, int64_t bits, double lo_log2, double hi_log2) {
+    float levels = (bits > 0) ? (float)((1 << (int)bits) - 1) : 0.f;
+    float lo = (float)lo_log2, hi = (float)hi_log2;
+    cudaMemcpyToSymbol(c_nq_levels, &levels, sizeof(float));
+    cudaMemcpyToSymbol(c_nq_lo, &lo, sizeof(float));
+    cudaMemcpyToSymbol(c_nq_hi, &hi, sizeof(float));
+    cudaDeviceSynchronize();
+}
+
 template <int CHUNK_LEN=32, typename F>
 std::tuple<at::Tensor, at::Tensor> rwkv7_wkv_qat_lr_forward_cuda(
     const at::Tensor& r_BTHK, const at::Tensor& k_BTHK, const at::Tensor& v_BTHK,
@@ -1307,5 +1336,6 @@ TORCH_LIBRARY_IMPL(rwkv, CUDA, m) {
     m.impl("rwkv7_wkv_qat_lr_forward_float", &rwkv7_wkv_qat_lr_forward_cuda<CHECKPOINT_LEN, float>);
     m.impl("rwkv7_wkv_qat_lr_backward_float", &rwkv7_wkv_qat_lr_backward_cuda<CHECKPOINT_LEN, float>);
     m.impl("rwkv7_set_pq_codebook", &rwkv7_set_pq_codebook_cuda);
+    m.impl("rwkv7_set_norm_quant", &rwkv7_set_norm_quant_cuda);
 }
 }

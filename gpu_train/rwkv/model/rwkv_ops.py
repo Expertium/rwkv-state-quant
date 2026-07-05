@@ -443,6 +443,13 @@ def maybe_upload_pq_codebook():
     cb = torch.tensor(vals[:need], dtype=torch.float32, device="cuda")
     torch.ops.rwkv.rwkv7_set_pq_codebook(cb, m, sub, ncent)
     print(f"[QAT-PQ] uploaded rank-1 codebook {path}: m={m} sub={sub} ncent={ncent} ({need} floats)")
+    # RWKV_QAT_NORM_BITS=<n>: model the deploy norm quant (engine RWKV_PQ_NORM_BITS) in the QAT forward —
+    # WKV factor norms at n bits, log2-uniform over the engine's fixed WKV range [-3,0] octaves. The
+    # shift-path analog lives in rwkv_model.fake_pq_shift (range [2.2,2.9]).
+    nq_bits = int(os.environ.get("RWKV_QAT_NORM_BITS", "0") or 0)
+    if nq_bits > 0:
+        torch.ops.rwkv.rwkv7_set_norm_quant(cb, nq_bits, -3.0, 0.0)
+        print(f"[QAT-PQ] norm quant ON: int{nq_bits} log2-uniform over [-3,0] octaves (WKV factor norms)")
     _PQ_UPLOADED = True
 
 

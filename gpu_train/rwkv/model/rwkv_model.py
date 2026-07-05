@@ -94,6 +94,21 @@ _SHIFT_PQ_PATH = os.environ.get("RWKV_QAT_SHIFT_PQ", "")
 _SHIFT_PQ_LEARN = os.environ.get("RWKV_QAT_SHIFT_PQ_LEARN", "") == "1"
 _SHIFT_PQ_CB = None  # [2, m, ncent, sub] f32; plain tensor, or Parameter when _SHIFT_PQ_LEARN
 _SHIFT_PQ_META = None  # (m, sub, ncent)
+# RWKV_QAT_NORM_BITS: model the deploy norm quant (engine RWKV_PQ_NORM_BITS) — shift norms at n bits,
+# log2-uniform over the engine's fixed shift range [2.2,2.9] octaves. Matching still uses the TRUE norm;
+# only the reconstruction rescale is quantized (exact mirror of PqCodebook::encode_decode). The WKV
+# analog is uploaded to the CUDA kernel in rwkv_ops.maybe_upload_pq_codebook (range [-3,0]).
+_NORM_BITS = int(os.environ.get("RWKV_QAT_NORM_BITS", "0") or 0)
+_SHIFT_NQ_LO, _SHIFT_NQ_HI = 2.2, 2.9
+
+
+def _nq_quant_norm(norm):
+    """Engine norm quant on a (N,1) f32 tensor: log2-uniform, round HALF-AWAY (floor(x+0.5) — clamp to
+    [0,levels] makes it identical to Rust f32::round here), exp2 back. Caller masks norm>=1e-20."""
+    levels = float((1 << _NORM_BITS) - 1)
+    t = (norm.clamp_min(1e-20).log2() - _SHIFT_NQ_LO) / (_SHIFT_NQ_HI - _SHIFT_NQ_LO)
+    q = torch.floor(t * levels + 0.5).clamp(0.0, levels)
+    return torch.exp2(_SHIFT_NQ_LO + q / levels * (_SHIFT_NQ_HI - _SHIFT_NQ_LO))
 
 
 def shift_pq_init(device):
@@ -137,9 +152,11 @@ def fake_pq_shift(x_BTC: torch.Tensor, role: int) -> torch.Tensor:
     with torch.no_grad():
         norm = flat.norm(dim=1, keepdim=True)
         ok = norm.squeeze(1) > 1e-20
-        unit = flat / norm.clamp_min(1e-20)
+        unit = flat / norm.clamp_min(1e-20)                            # matching by the TRUE norm
         idxs = [torch.cdist(unit[:, p * sub:(p + 1) * sub], cb[role, p].detach()).argmin(dim=1)
                 for p in range(m)]                                     # first strict min, frozen
+        if _NORM_BITS:
+            norm = _nq_quant_norm(norm)                                # reconstruct with quantized norm
     parts = [cb[role, p][idxs[p]] for p in range(m)]                   # differentiable w.r.t. cb
     q = torch.cat(parts, dim=1) * norm
     q = torch.where(ok.unsqueeze(1), q, flat.detach()).reshape(B, T, C).to(x_BTC.dtype)
