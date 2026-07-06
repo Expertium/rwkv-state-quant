@@ -123,6 +123,29 @@ _SHIFT_ROT_LEARN = _SHIFT_ROT_ENV == "1"
 _SHIFT_ROT_P = None      # Parameter [2, C, C] (the unconstrained Cayley pre-image), or None
 _SHIFT_ROT_FIXED = None  # [2, C, C] orthogonal R loaded from a file (eval: RWKV_QAT_SHIFT_ROT=<path>)
 
+# SPEED FLAGS (2026-07-06 profile: ~36k kernel launches/step, CPU ~1.9 s vs GPU ~0.4 s -> launch-bound).
+# Both default OFF: they are numerically equivalent but NOT bit-identical to the old paths (fp summation
+# order changes), so a run with a flag on is trajectory-perturbed vs its old-code twin (like a seed
+# change). Never flip one mid-A/B.
+# RWKV_QAT_ROT_CACHE=1: solve the Cayley transform ONCE per training step per role instead of per
+#   fake_pq_shift call (~72 linalg_solve/step -> 2; ~150 ms CPU/step). The cached R is a shared autograd
+#   node: grads into the rotation accumulate as J^T(sum u_i) instead of sum(J^T u_i) — equal math, last-
+#   ulp different sums. Cache is cleared by shift_rot_cache_clear() (train loop, top of every step) and
+#   is only ever filled under grad mode (no_grad validation/export always recompute fresh values).
+# RWKV_QAT_FAST_EMB=1: hard-phase codebook lookup as one-hot @ cb instead of advanced indexing. Forward
+#   bit-identical (one-hot picks rows exactly); backward turns the DETERMINISTIC-mode index_put_ (33% of
+#   hard-phase GPU time, ~170 ms/step) into a deterministic mm with a different accumulation order.
+_SHIFT_ROT_CACHE_ON = os.environ.get("RWKV_QAT_ROT_CACHE", "") == "1"
+_SHIFT_ROT_CACHE = {}    # role -> R (graph-carrying); valid within one training step only
+_FAST_EMB = os.environ.get("RWKV_QAT_FAST_EMB", "") == "1"
+
+
+def shift_rot_cache_clear():
+    """Train-loop hook: call at the TOP of every training step (before the forward). Clearing per step
+    makes the cached graph-carrying R live exactly one forward+backward — no freed-graph reuse even on
+    skipped (non-finite) steps, no staleness after optimizer.step. No-op when the cache is off/empty."""
+    _SHIFT_ROT_CACHE.clear()
+
 # RWKV_QAT_SHIFT_ANNEAL=<tau0>: SOFT-TO-HARD selection annealing for the shift PQ (soft-to-hard vector
 # quantization, Agustsson et al. 2017, adapted). For the early fraction of training the hard nearest-
 # centroid snap is replaced by a fully differentiable softmax(-d^2/tau) blend over each chunk's
@@ -176,10 +199,17 @@ def _shift_rot_matrix(role):
         return _shift_rot_load("cpu" if _SHIFT_PQ_CB is None else _SHIFT_PQ_CB.device)[role]
     if _SHIFT_ROT_P is None:
         return None
+    if _SHIFT_ROT_CACHE_ON and torch.is_grad_enabled():
+        hit = _SHIFT_ROT_CACHE.get(role)
+        if hit is not None:
+            return hit
     p = _SHIFT_ROT_P[role]
     a = p - p.T
     eye = torch.eye(a.shape[0], dtype=a.dtype, device=a.device)
-    return torch.linalg.solve(eye + a, eye - a)  # (I+A)^-1 (I-A), orthogonal for any A skew
+    r = torch.linalg.solve(eye + a, eye - a)  # (I+A)^-1 (I-A), orthogonal for any A skew
+    if _SHIFT_ROT_CACHE_ON and torch.is_grad_enabled():
+        _SHIFT_ROT_CACHE[role] = r
+    return r
 
 
 def shift_rot_export(path):
@@ -260,7 +290,13 @@ def fake_pq_shift(x_BTC: torch.Tensor, role: int) -> torch.Tensor:
                 for p in range(m)]                                     # first strict min, frozen
         if _NORM_BITS:
             norm = _nq_quant_norm(norm)                                # reconstruct with quantized norm
-    parts = [cb[role, p][idxs[p]] for p in range(m)]                   # differentiable w.r.t. cb
+    if _FAST_EMB:
+        # one-hot @ cb: forward picks the same rows bit-exactly; backward = deterministic mm into the
+        # codebook instead of deterministic-mode index_put_ (the hard-phase GPU hotspot, see flag note).
+        parts = [torch.nn.functional.one_hot(idxs[p], num_classes=ncent).to(cb.dtype) @ cb[role, p]
+                 for p in range(m)]
+    else:
+        parts = [cb[role, p][idxs[p]] for p in range(m)]                # differentiable w.r.t. cb
     q = torch.cat(parts, dim=1) * norm
     if rot is not None:
         q = q @ rot                                                    # un-rotate; real grads into R

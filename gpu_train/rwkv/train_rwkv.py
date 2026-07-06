@@ -21,6 +21,7 @@ import wandb
 
 from rwkv.parse_toml import parse_toml
 from rwkv.prepare_batch import prepare_data_train_test
+from rwkv.model import rwkv_model as _rwkv_model_rc
 from rwkv.model.srs_model import SrsRWKV
 from rwkv.architecture import *
 from rwkv.utils import (
@@ -607,8 +608,14 @@ def main_loop(config, task_queue, batch_queue):
     ema_decay = float(os.environ.get("RWKV_EMA_DECAY") or "0")
     ema_start = config.WARMUP_STEPS if config.TRAIN_MODE == "WS" else 0
     ema_state = None
+    # RWKV_QAT_EMA_FOREACH=1 (default off): vectorize the per-step EMA update via _foreach_mul_/_foreach_add_
+    # -- ~880 tiny kernel launches -> 4. Same in-place ops on the same tensors element-wise, so unlike the
+    # other speed flags this one IS bit-identical; kept flag-gated anyway so in-flight runs stay untouched.
+    ema_foreach = os.environ.get("RWKV_QAT_EMA_FOREACH", "") == "1"
+    ema_lists = None  # cached ([ema tensors...], [master tensors...]) -- objects are stable across steps
     if ema_decay > 0:
-        print(f"[ema] weight averaging ON, decay={ema_decay}, start after step {ema_start}")
+        print(f"[ema] weight averaging ON, decay={ema_decay}, start after step {ema_start}"
+              + (", foreach" if ema_foreach else ""))
 
     # The early-step torch.cuda.empty_cache() (next 1000 steps) guards against allocator
     # fragmentation OOM under the variable-seq-length workload, but it COSTS ~150 ms/step
@@ -656,6 +663,10 @@ def main_loop(config, task_queue, batch_queue):
             log["lr"] = optimizer.param_groups[0]["lr"]
             if _rm_anneal is not None:
                 _rm_anneal.set_shift_anneal_progress(step / total_steps)
+
+            # Rotation-cache hygiene (RWKV_QAT_ROT_CACHE): drop the previous step's graph-carrying
+            # cached Cayley R before this step's forward. No-op when the cache flag is off.
+            _rwkv_model_rc.shift_rot_cache_clear()
 
             keys = str(groups[group_i])
             print(f"\n{keys}")
@@ -753,6 +764,12 @@ def main_loop(config, task_queue, batch_queue):
                     if ema_state is None:  # init EMA to the post-warmup weights
                         ema_state = {k: v.detach().float().clone()
                                      for k, v in msd.items() if v.is_floating_point()}
+                    elif ema_foreach:
+                        if ema_lists is None:
+                            ema_lists = ([ema_state[k] for k in msd if k in ema_state],
+                                         [msd[k].detach() for k in msd if k in ema_state])
+                        torch._foreach_mul_(ema_lists[0], ema_decay)
+                        torch._foreach_add_(ema_lists[0], ema_lists[1], alpha=1 - ema_decay)
                     else:
                         for k, v in msd.items():
                             if k in ema_state:
