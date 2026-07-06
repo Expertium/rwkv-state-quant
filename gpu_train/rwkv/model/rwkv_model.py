@@ -286,13 +286,23 @@ def fake_pq_shift(x_BTC: torch.Tensor, role: int) -> torch.Tensor:
         norm = work.norm(dim=1, keepdim=True)                          # (= ||flat||: R is orthogonal)
         ok = norm.squeeze(1) > 1e-20
         unit = work / norm.clamp_min(1e-20)                            # matching by the TRUE norm
-        idxs = [torch.cdist(unit[:, p * sub:(p + 1) * sub], cb[role, p].detach()).argmin(dim=1)
+        # Row-chunked encode for BIG catalogs (m2b12: ncent=4096 -> a full cdist matrix is
+        # N x 4096 ~ 1 GB fp32 at N~66k, too big a transient on 12 GB). Rows are independent, so
+        # slicing N changes NOTHING (bit-identical indices); small catalogs keep the one-shot path.
+        def _nearest(u_p, cb_p):
+            if u_p.shape[0] * cb_p.shape[0] <= (1 << 27):
+                return torch.cdist(u_p, cb_p).argmin(dim=1)
+            outs = [torch.cdist(u_p[s:s + 8192], cb_p).argmin(dim=1)
+                    for s in range(0, u_p.shape[0], 8192)]
+            return torch.cat(outs)
+        idxs = [_nearest(unit[:, p * sub:(p + 1) * sub], cb[role, p].detach())
                 for p in range(m)]                                     # first strict min, frozen
         if _NORM_BITS:
             norm = _nq_quant_norm(norm)                                # reconstruct with quantized norm
-    if _FAST_EMB:
+    if _FAST_EMB and ncent <= 256:
         # one-hot @ cb: forward picks the same rows bit-exactly; backward = deterministic mm into the
         # codebook instead of deterministic-mode index_put_ (the hard-phase GPU hotspot, see flag note).
+        # Guarded to small catalogs: a one-hot for m2b12 (ncent=4096) would itself be ~1 GB fp32.
         parts = [torch.nn.functional.one_hot(idxs[p], num_classes=ncent).to(cb.dtype) @ cb[role, p]
                  for p in range(m)]
     else:
