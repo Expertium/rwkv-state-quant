@@ -533,7 +533,8 @@ def main_loop(config, task_queue, batch_queue):
         if _wkv_cb_param is not None and _wkv_cb_param.grad is not None:
             from rwkv.model import rwkv_ops as _ro
             _m, _sd, _nc = _ro._PQ_META[0], _ro._PQ_META[1], _ro._PQ_META[2]
-            specs.append(("wkvcb", _wkv_cb_param, (2 * _m, _nc, _sd), _ro))
+            _jt = _ro._PQ_META[5] if len(_ro._PQ_META) > 5 else 0  # joint-uv: 1 block (whole catalog)
+            specs.append(("wkvcb", _wkv_cb_param, ((1 if _jt else 2 * _m), _nc, _sd), _ro))
         for name, p, (nb, nc, sd), ro in specs:
             gn = p.grad.detach().float().view(nb, nc, sd).norm(dim=-1)  # [blocks, centroids]
             ema = _res_ema.get(name)

@@ -306,7 +306,11 @@ __constant__ int c_pq_active = 0;
 __constant__ int c_pq_m = 0;
 __constant__ int c_pq_subdim = 0;
 __constant__ int c_pq_ncent = 0;
-__device__ float g_pq_cb[8192];
+// JOINT-UV mode (task23): the single catalog holds concat(u_unit, v_unit) 2K-dim entries; ONE index
+// per head selects BOTH factor directions, each half rescaled by its own (quantized) norm. subdim=2K,
+// layout g_pq_cb[c*subdim + j] (no role blocks). Mirror of engine PqCodebook::encode_decode_joint.
+__constant__ int c_pq_joint = 0;
+__device__ float g_pq_cb[32768];   // grown 8192 -> 32768 for joint-uv (ncent<=1024 x subdim 32)
 // ---- NORM QUANT for the PQ branch (train==deploy analog of engine RWKV_PQ_NORM_BITS): reconstruct with
 // the factor norm quantized to n bits, log2-uniform over [c_nq_lo, c_nq_hi] octaves; centroid MATCHING
 // still uses the TRUE norm (mirrors PqCodebook::encode_decode). c_nq_levels = 2^bits - 1; 0 = off. ----
@@ -319,7 +323,7 @@ __constant__ float c_nq_hi = 0.f;
 // gradient dL/dQ_t is outer-product-reduced against the counterpart factor. Python fetches the buffer
 // into the codebook Parameter's .grad each step and re-uploads the stepped codebook. ----
 __constant__ int c_pq_learn = 0;
-__device__ float g_pq_cb_grad[8192];
+__device__ float g_pq_cb_grad[32768];
 
 // Quantize a factor norm exactly like engine encode_decode: t -> round (HALF-AWAY, matches Rust
 // f32::round) -> clamp -> exp2. Caller guarantees norm is finite and >= 1e-20.
@@ -471,6 +475,49 @@ __device__ inline float qat_lr_rank1(float a_val, int K, float qmax, int* rec_id
         if (rec_idx != nullptr && tid == 0) {                  // learnable-cb recording: default -1/0
             for (int i = 0; i < 2 * c_pq_m; i++) rec_idx[i] = -1;
             rec_norm[0] = 0.f; rec_norm[1] = 0.f;
+        }
+        if (c_pq_joint) {
+            // ---- JOINT-UV: one 2K-dim code selects BOTH directions (engine encode_decode_joint
+            // mirror: u-half distances first then v-half, first-strict-min, per-half norm rescale).
+            // A degenerate norm on EITHER factor skips the pair (block-uniform: sc_nu/sc_nv shared).
+            float nu = sc_nu, nv = sc_nv;
+            if (isfinite(nu) && nu >= 1e-20f && isfinite(nv) && nv >= 1e-20f) {
+                float iu = 1.0f / nu, iv = 1.0f / nv;          // matching by the TRUE norms
+                float qu = (c_nq_levels > 0.f) ? nq_quant_norm(nu) : nu;
+                float qv = (c_nq_levels > 0.f) ? nq_quant_norm(nv) : nv;
+                if (rec_norm != nullptr && tid == 0) { rec_norm[0] = qu; rec_norm[1] = qv; }
+                float bd = INFINITY; int bi = 0x7fffffff;
+                for (int c = tid; c < c_pq_ncent; c += nthreads) {
+                    const float* cc = &g_pq_cb[c * c_pq_subdim];
+                    float d = 0.f;
+                    for (int j = 0; j < K; j++) { float diff = ufq[j] * iu - cc[j]; d += diff * diff; }
+                    for (int j = 0; j < K; j++) { float diff = vfq[j] * iv - cc[K + j]; d += diff * diff; }
+                    if (d < bd) { bd = d; bi = c; }
+                }
+                for (int o = 16; o > 0; o >>= 1) {             // warp argmin (same as the role path)
+                    float od = __shfl_down_sync(FULL_MASK, bd, o);
+                    int oi = __shfl_down_sync(FULL_MASK, bi, o);
+                    if (od < bd || (od == bd && oi < bi)) { bd = od; bi = oi; }
+                }
+                if ((tid & 31) == 0) { red[tid >> 5] = bd; s_bidx[tid >> 5] = bi; }
+                __syncthreads();
+                if (tid == 0) {                                // cross-warp argmin + all-bad fallback
+                    int nwarps = (nthreads + 31) / 32;
+                    float fd = red[0]; int fi = s_bidx[0];
+                    for (int i = 1; i < nwarps; i++) {
+                        if (red[i] < fd || (red[i] == fd && s_bidx[i] < fi)) { fd = red[i]; fi = s_bidx[i]; }
+                    }
+                    sc_best = (fi == 0x7fffffff) ? 0 : fi;
+                    if (rec_idx != nullptr) rec_idx[0] = sc_best;
+                }
+                __syncthreads();
+                if (tid < K) {
+                    ufq[tid] = g_pq_cb[sc_best * c_pq_subdim + tid] * qu;
+                    vfq[tid] = g_pq_cb[sc_best * c_pq_subdim + K + tid] * qv;
+                }
+                __syncthreads();                               // write-back + red/s_bidx reuse fence
+            }
+            return ufq[x] * vfq[y];
         }
         for (int role = 0; role < 2; role++) {
             float norm = (role == 0) ? sc_nu : sc_nv;
@@ -1026,11 +1073,17 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
             if (c_pq_learn && c_pq_active && !skip) {
                 KK_G[get_index1(x, y, K + 1)] = G_xy;
                 if (x == 0 && y < K) {                 // reconstruct step-t factors from the recording
-                    int p = y / c_pq_subdim, j = y - p * c_pq_subdim;
-                    int ciu = rec_idx_chunk[c * 8 + p];
-                    int civ = rec_idx_chunk[c * 8 + c_pq_m + p];
-                    K_ufq[y] = (ciu >= 0) ? g_pq_cb[(p * c_pq_ncent + ciu) * c_pq_subdim + j] * rec_norm_chunk[c * 2] : 0.f;
-                    K_vfq[y] = (civ >= 0) ? g_pq_cb[((c_pq_m + p) * c_pq_ncent + civ) * c_pq_subdim + j] * rec_norm_chunk[c * 2 + 1] : 0.f;
+                    if (c_pq_joint) {                  // joint-uv: ONE code, halves u=[0,K) v=[K,2K)
+                        int ci = rec_idx_chunk[c * 8];
+                        K_ufq[y] = (ci >= 0) ? g_pq_cb[ci * c_pq_subdim + y] * rec_norm_chunk[c * 2] : 0.f;
+                        K_vfq[y] = (ci >= 0) ? g_pq_cb[ci * c_pq_subdim + K + y] * rec_norm_chunk[c * 2 + 1] : 0.f;
+                    } else {
+                        int p = y / c_pq_subdim, j = y - p * c_pq_subdim;
+                        int ciu = rec_idx_chunk[c * 8 + p];
+                        int civ = rec_idx_chunk[c * 8 + c_pq_m + p];
+                        K_ufq[y] = (ciu >= 0) ? g_pq_cb[(p * c_pq_ncent + ciu) * c_pq_subdim + j] * rec_norm_chunk[c * 2] : 0.f;
+                        K_vfq[y] = (civ >= 0) ? g_pq_cb[((c_pq_m + p) * c_pq_ncent + civ) * c_pq_subdim + j] * rec_norm_chunk[c * 2 + 1] : 0.f;
+                    }
                 }
                 __syncthreads();
                 float gu = KK_G[get_index1(x, y, K + 1)] * K_vfq[y];  // row x: sum_y G[x][y]*vfq[y]
@@ -1040,11 +1093,19 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
                     gv += __shfl_down_sync(FULL_MASK, gv, o, K);
                 }
                 if (y == 0) {
-                    int p = x / c_pq_subdim, j = x - p * c_pq_subdim;
-                    int ciu = rec_idx_chunk[c * 8 + p];
-                    int civ = rec_idx_chunk[c * 8 + c_pq_m + p];
-                    if (ciu >= 0) atomicAdd(&g_pq_cb_grad[(p * c_pq_ncent + ciu) * c_pq_subdim + j], rec_norm_chunk[c * 2] * gu);
-                    if (civ >= 0) atomicAdd(&g_pq_cb_grad[((c_pq_m + p) * c_pq_ncent + civ) * c_pq_subdim + j], rec_norm_chunk[c * 2 + 1] * gv);
+                    if (c_pq_joint) {                  // joint-uv: both halves of ONE centroid
+                        int ci = rec_idx_chunk[c * 8];
+                        if (ci >= 0) {
+                            atomicAdd(&g_pq_cb_grad[ci * c_pq_subdim + x], rec_norm_chunk[c * 2] * gu);
+                            atomicAdd(&g_pq_cb_grad[ci * c_pq_subdim + K + x], rec_norm_chunk[c * 2 + 1] * gv);
+                        }
+                    } else {
+                        int p = x / c_pq_subdim, j = x - p * c_pq_subdim;
+                        int ciu = rec_idx_chunk[c * 8 + p];
+                        int civ = rec_idx_chunk[c * 8 + c_pq_m + p];
+                        if (ciu >= 0) atomicAdd(&g_pq_cb_grad[(p * c_pq_ncent + ciu) * c_pq_subdim + j], rec_norm_chunk[c * 2] * gu);
+                        if (civ >= 0) atomicAdd(&g_pq_cb_grad[((c_pq_m + p) * c_pq_ncent + civ) * c_pq_subdim + j], rec_norm_chunk[c * 2 + 1] * gv);
+                    }
                 }
                 __syncthreads();                       // KK_G/K_ufq/K_vfq reuse fence for the next t
             }
@@ -1067,21 +1128,24 @@ at::Tensor rwkv7_lr_trunc_test_cuda(const at::Tensor& state_BHKK, double qmax) {
 // Upload the rank-1 PQ codebook (roles 0,1) to the device globals; m<=0 disables PQ (qat_lr_rank1 reverts
 // to its int-N path). cb_flat = float[2*m*ncent*sub] in layout ((role*m+p)*ncent+c)*sub+j (roles 0=u,1=v).
 // Called ONCE before a PQ-QAT run. Not templated (global state), registered as a plain CUDA op.
-static int h_pq_m = 0, h_pq_sub = 0, h_pq_ncent = 0;   // host mirror of the uploaded codebook shape
+static int h_pq_m = 0, h_pq_sub = 0, h_pq_ncent = 0, h_pq_joint = 0;   // host mirror of the codebook shape
 
-void rwkv7_set_pq_codebook_cuda(const at::Tensor& cb_flat, int64_t m, int64_t sub, int64_t ncent) {
+void rwkv7_set_pq_codebook_cuda(const at::Tensor& cb_flat, int64_t m, int64_t sub, int64_t ncent, int64_t joint) {
     int active = (m > 0) ? 1 : 0;
-    int mi = (int)m, si = (int)sub, ni = (int)ncent;
-    h_pq_m = mi; h_pq_sub = si; h_pq_ncent = ni;
+    int mi = (int)m, si = (int)sub, ni = (int)ncent, ji = joint ? 1 : 0;
+    h_pq_m = mi; h_pq_sub = si; h_pq_ncent = ni; h_pq_joint = ji;
     cudaMemcpyToSymbol(c_pq_active, &active, sizeof(int));
     cudaMemcpyToSymbol(c_pq_m, &mi, sizeof(int));
     cudaMemcpyToSymbol(c_pq_subdim, &si, sizeof(int));
     cudaMemcpyToSymbol(c_pq_ncent, &ni, sizeof(int));
+    cudaMemcpyToSymbol(c_pq_joint, &ji, sizeof(int));
     if (active) {
         auto cbf = cb_flat.to(torch::kFloat32).to(torch::kCPU).contiguous();
         size_t n = (size_t)cbf.numel();
-        TORCH_CHECK(n == (size_t)(2 * m * ncent * sub), "PQ codebook size mismatch: ", n, " != 2*m*ncent*sub");
-        TORCH_CHECK(n <= 8192, "PQ codebook too large: ", n, " > 8192 (roles 0,1, ncent<=256, K=16)");
+        size_t want = ji ? (size_t)(ncent * sub) : (size_t)(2 * m * ncent * sub);  // joint = 1 block
+        TORCH_CHECK(n == want, "PQ codebook size mismatch: ", n, " != ", want);
+        TORCH_CHECK(n <= 32768, "PQ codebook too large: ", n, " > 32768");
+        TORCH_CHECK(!ji || m == 1, "joint PQ codebook requires m == 1");
         cudaMemcpyToSymbol(g_pq_cb, cbf.data_ptr<float>(), n * sizeof(float));
     }
     cudaDeviceSynchronize();
@@ -1110,12 +1174,12 @@ void rwkv7_set_pq_learn_cuda(const at::Tensor& dev, int64_t on) {
 void rwkv7_pq_cb_grad_zero_cuda(const at::Tensor& dev) {
     void* addr = nullptr;
     cudaGetSymbolAddress(&addr, g_pq_cb_grad);
-    cudaMemsetAsync(addr, 0, sizeof(float) * 8192);
+    cudaMemsetAsync(addr, 0, sizeof(float) * 32768);
 }
 
-// Fetch the accumulated centroid grads (roles 0,1 layout = g_pq_cb) as a CUDA float tensor.
+// Fetch the accumulated centroid grads (same layout as g_pq_cb) as a CUDA float tensor.
 at::Tensor rwkv7_pq_cb_grad_get_cuda(const at::Tensor& dev) {
-    int n = 2 * h_pq_m * h_pq_ncent * h_pq_sub;
+    int n = h_pq_joint ? h_pq_ncent * h_pq_sub : 2 * h_pq_m * h_pq_ncent * h_pq_sub;
     TORCH_CHECK(n > 0, "pq_cb_grad_get: no codebook uploaded");
     at::Tensor out = torch::empty({n}, torch::dtype(torch::kFloat32).device(dev.device()));
     cudaMemcpyFromSymbol(out.data_ptr<float>(), g_pq_cb_grad, n * sizeof(float), 0, cudaMemcpyDeviceToDevice);

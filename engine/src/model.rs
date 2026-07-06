@@ -320,6 +320,11 @@ pub struct PqCodebook {
     pub norm_bits: Option<u32>,
     pub norm_lo_log2: f32,
     pub norm_hi_log2: f32,
+    /// JOINT-UV mode (task23, the m2b12 "index bits ≠ catalog size" principle on the WKV side):
+    /// header sub_dim == 2*k with m == 1 → the single catalog holds concat(u_unit, v_unit) 32-dim
+    /// entries; ONE index per head selects BOTH factor directions (u/v correlation captured), each
+    /// half rescaled by its own (norm-quantized) norm. File = 1 centroid block instead of 4.
+    pub joint: bool,
 }
 
 impl PqCodebook {
@@ -338,6 +343,9 @@ impl PqCodebook {
         let h: Vec<usize> = hdr.split_whitespace().map(|x| x.parse()).collect::<Result<_, _>>()?;
         anyhow::ensure!(h.len() >= 5, "bad PQ header");
         let (m, sub_dim, k, ncent) = (h[0], h[2], h[3], h[4]);
+        // joint-uv detection: one catalog of concat(u,v) entries (only meaningful for WKV, n_roles=4)
+        let joint = sub_dim == 2 * k && m == 1;
+        let n_roles = if joint { 1 } else { n_roles };
         let mut cb = Vec::with_capacity(n_roles * m);
         for _ in 0..n_roles * m {
             let mut flat = Vec::with_capacity(ncent * sub_dim);
@@ -350,7 +358,7 @@ impl PqCodebook {
             anyhow::ensure!(flat.len() == ncent * sub_dim, "PQ centroid block size mismatch");
             cb.push(flat);
         }
-        Ok(Self { m, sub_dim, k, ncent, cb, norm_bits: None, norm_lo_log2: 0.0, norm_hi_log2: 0.0 })
+        Ok(Self { m, sub_dim, k, ncent, cb, norm_bits: None, norm_lo_log2: 0.0, norm_hi_log2: 0.0, joint })
     }
 
     /// Enable norm quantization (see field docs). Called by Model::load per codebook with its range.
@@ -358,6 +366,25 @@ impl PqCodebook {
         self.norm_bits = Some(bits);
         self.norm_lo_log2 = lo_log2;
         self.norm_hi_log2 = hi_log2;
+    }
+
+    /// The RWKV_PQ_NORM_BITS norm quantizer (see field docs). Identity when norm_bits is None.
+    #[inline]
+    fn quant_norm(&self, norm: f32) -> f32 {
+        match self.norm_bits {
+            None => norm,
+            Some(0) => {
+                // 0 bits: norm = the FIXED range midpoint (nothing stored per card at all)
+                ((self.norm_lo_log2 + self.norm_hi_log2) * 0.5).exp2()
+            }
+            Some(bits) => {
+                // store norm at n bits, uniform in log2 over the fixed per-codebook range
+                let levels = ((1u32 << bits) - 1) as f32;
+                let t = (norm.log2() - self.norm_lo_log2) / (self.norm_hi_log2 - self.norm_lo_log2);
+                let q = (t * levels).round().clamp(0.0, levels);
+                (self.norm_lo_log2 + q / levels * (self.norm_hi_log2 - self.norm_lo_log2)).exp2()
+            }
+        }
     }
 
     /// In place: normalize `col` (K-dim) to unit, replace each sub-vector by its nearest centroid, rescale
@@ -369,18 +396,7 @@ impl PqCodebook {
             return;
         }
         let inv = 1.0 / norm; // chunks normalized by the TRUE norm (centroid match unaffected)
-        if let Some(bits) = self.norm_bits {
-            if bits == 0 {
-                // 0 bits: norm = the FIXED range midpoint (nothing stored per card at all)
-                norm = ((self.norm_lo_log2 + self.norm_hi_log2) * 0.5).exp2();
-            } else {
-                // store norm at n bits, uniform in log2 over the fixed per-codebook range
-                let levels = ((1u32 << bits) - 1) as f32;
-                let t = (norm.log2() - self.norm_lo_log2) / (self.norm_hi_log2 - self.norm_lo_log2);
-                let q = (t * levels).round().clamp(0.0, levels);
-                norm = (self.norm_lo_log2 + q / levels * (self.norm_hi_log2 - self.norm_lo_log2)).exp2();
-            }
-        }
+        norm = self.quant_norm(norm);
         for p in 0..self.m {
             let s = p * self.sub_dim;
             let cents = &self.cb[role * self.m + p];
@@ -402,6 +418,46 @@ impl PqCodebook {
             for j in 0..self.sub_dim {
                 col[s + j] = cents[base + j] * norm;
             }
+        }
+    }
+
+    /// JOINT-UV encode (self.joint == true): match concat(u/‖u‖, v/‖v‖) (2K-dim) against the single
+    /// catalog, reconstruct u from the winner's first half × quant(‖u‖) and v from the second half ×
+    /// quant(‖v‖). Matching uses the TRUE norms (like encode_decode); a degenerate norm on EITHER
+    /// factor leaves BOTH untouched (the pair is one code — half a code is meaningless).
+    #[inline]
+    pub(crate) fn encode_decode_joint(&self, u: &mut [f32], v: &mut [f32]) {
+        let k = u.len();
+        let nu = u.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nv = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !nu.is_finite() || nu < 1e-20 || !nv.is_finite() || nv < 1e-20 {
+            return;
+        }
+        let (iu, iv) = (1.0 / nu, 1.0 / nv);
+        let (qu, qv) = (self.quant_norm(nu), self.quant_norm(nv));
+        let cents = &self.cb[0];
+        let mut best = 0usize;
+        let mut bestd = f32::INFINITY;
+        for c in 0..self.ncent {
+            let base = c * self.sub_dim;
+            let mut d = 0f32;
+            for j in 0..k {
+                let diff = u[j] * iu - cents[base + j];
+                d += diff * diff;
+            }
+            for j in 0..k {
+                let diff = v[j] * iv - cents[base + k + j];
+                d += diff * diff;
+            }
+            if d < bestd {
+                bestd = d;
+                best = c;
+            }
+        }
+        let base = best * self.sub_dim;
+        for j in 0..k {
+            u[j] = cents[base + j] * qu;
+            v[j] = cents[base + k + j] * qv;
         }
     }
 }
@@ -533,8 +589,13 @@ pub fn compress_wkv_state(
                         vs[o + i] = -vs[o + i];
                     }
                 }
-                pq.encode_decode(2 * j, &mut us[o..o + k]);
-                pq.encode_decode(2 * j + 1, &mut vs[o..o + k]);
+                if pq.joint {
+                    // joint-uv catalog: ONE code per (head, rank-component) selects both directions
+                    pq.encode_decode_joint(&mut us[o..o + k], &mut vs[o..o + k]);
+                } else {
+                    pq.encode_decode(2 * j, &mut us[o..o + k]);
+                    pq.encode_decode(2 * j + 1, &mut vs[o..o + k]);
+                }
             }
         } else if let Some(qmax) = factor_qmax {
             let vq = v_qmax.unwrap_or(qmax);
