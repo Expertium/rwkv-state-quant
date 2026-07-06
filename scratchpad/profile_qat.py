@@ -15,6 +15,10 @@ import time
 ROOT = r"C:\Users\Andrew\rwkv-state-quant"
 GT = os.path.join(ROOT, "gpu_train")
 SCRATCH = os.path.join(ROOT, "scratchpad")
+# RWKV_PROFILE_TAG: suffix for output files (e.g. "_fast" for the speed-flag A/B rerun) so runs
+# don't clobber each other. The speed flags themselves (RWKV_QAT_ROT_CACHE / RWKV_QAT_FAST_EMB /
+# RWKV_QAT_EMA_FOREACH) are inherited from the caller's environment — NOT forced here.
+TAG = os.environ.get("RWKV_PROFILE_TAG", "")
 
 # --- env: EXACT q56s lever stack. MUST precede any rwkv import (module-level env reads). ---
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -65,6 +69,10 @@ def make_step(config, master_model, model, teacher, optimizer, scheduler,
     ema_decay = 0.99
     RES_DECAY = 0.99
 
+    from rwkv.model import rwkv_model as _rm_rc
+    ema_foreach = os.environ.get("RWKV_QAT_EMA_FOREACH", "") == "1"
+    ema_lists = [None]
+
     def step_fn(batch, timed=False):
         segs = {}
 
@@ -74,6 +82,7 @@ def make_step(config, master_model, model, teacher, optimizer, scheduler,
                 segs[name] = time.perf_counter() - t0
             return time.perf_counter()
 
+        _rm_rc.shift_rot_cache_clear()  # per-step hygiene, mirrors train_rwkv (no-op when cache off)
         t0 = time.perf_counter()
         model.copy_downcast_(master_model, dtype=config.DTYPE)
         model.train()
@@ -127,6 +136,12 @@ def make_step(config, master_model, model, teacher, optimizer, scheduler,
             for k, v in msd.items():
                 if v.is_floating_point():
                     ema_state[k] = v.detach().float().clone()
+        elif ema_foreach:
+            if ema_lists[0] is None:
+                ema_lists[0] = ([ema_state[k] for k in msd if k in ema_state],
+                                [msd[k].detach() for k in msd if k in ema_state])
+            torch._foreach_mul_(ema_lists[0][0], ema_decay)
+            torch._foreach_add_(ema_lists[0][0], ema_lists[0][1], alpha=1 - ema_decay)
         else:
             for k, v in msd.items():
                 if k in ema_state:
@@ -151,7 +166,9 @@ def run(task_queue, batch_queue):
 
     config = parse_toml()
     _maybe_enable_determinism()
-    out_path = os.path.join(SCRATCH, "profile_qat_out.txt")
+    out_path = os.path.join(SCRATCH, f"profile_qat_out{TAG}.txt")
+    emit_flags = {k: os.environ.get(k, "") for k in
+                  ("RWKV_QAT_ROT_CACHE", "RWKV_QAT_FAST_EMB", "RWKV_QAT_EMA_FOREACH")}
     out_lines = []
 
     def emit(s=""):
@@ -205,6 +222,7 @@ def run(task_queue, batch_queue):
     for i in range(n_need):
         data_fetcher.enqueue((f"train-{i}", groups[i % len(groups)]))
     emit(f"[profile] {n_need} batches enqueued ({N_FETCH} fetch procs), device={config.DEVICE}")
+    emit(f"[profile] speed flags: {emit_flags}")
 
     ema_state, res_ema = {}, {}
     step_fn = make_step(config, master_model, model, teacher, optimizer, scheduler,
@@ -247,7 +265,7 @@ def run(task_queue, batch_queue):
     emit("\n===== PROFILER soft phase: top 15 by CPU total =====")
     emit(prof_soft.key_averages().table(sort_by="cpu_time_total", row_limit=15))
     try:
-        prof_soft.export_chrome_trace(os.path.join(SCRATCH, "prof_qat_soft.json.gz"))
+        prof_soft.export_chrome_trace(os.path.join(SCRATCH, f"prof_qat_soft{TAG}.json.gz"))
     except Exception as e:
         emit(f"[trace export soft failed: {e}]")
     del prof_soft
@@ -266,7 +284,7 @@ def run(task_queue, batch_queue):
     emit("\n===== PROFILER hard phase: top 15 by CPU total =====")
     emit(prof_hard.key_averages().table(sort_by="cpu_time_total", row_limit=15))
     try:
-        prof_hard.export_chrome_trace(os.path.join(SCRATCH, "prof_qat_hard.json.gz"))
+        prof_hard.export_chrome_trace(os.path.join(SCRATCH, f"prof_qat_hard{TAG}.json.gz"))
     except Exception as e:
         emit(f"[trace export hard failed: {e}]")
 
