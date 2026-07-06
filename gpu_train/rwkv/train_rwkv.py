@@ -83,6 +83,26 @@ def extract_numbers(name):
     return None
 
 
+def maybe_compile_mixers(model, label=""):
+    """RWKV_QAT_COMPILE=1 (default off): torch.compile(dynamic=True) the time/channel-mixer
+    forwards — fuses the elementwise soup (mul/add/sigmoid/pow/lerp chains) between the custom WKV
+    kernels, which graph-break cleanly. Needs triton (triton-windows 3.7.1 present, Andrew OK'd
+    2026-07-06; small trajectory perturbation acceptable). Rebinds the bound forward instead of
+    wrapping the Module so parameter names stay intact (copy_downcast_ / master-child grad matching
+    depend on them). First few steps pay compile latency per new shape family; dynamic=True keeps
+    recompiles bounded across the variable-length buckets."""
+    if os.environ.get("RWKV_QAT_COMPILE", "") != "1":
+        return model
+    from rwkv.model import rwkv_model as _rm
+    n = 0
+    for m in model.modules():
+        if isinstance(m, (_rm.RWKV7TimeMixer, _rm.RWKV7ChannelMixer)):
+            m.forward = torch.compile(m.forward, dynamic=True)
+            n += 1
+    print(f"[compile] torch.compile(dynamic=True) on {n} mixer forwards {label}")
+    return model
+
+
 def get_optimizer(config, model):
     encode_params = []
     decay_params = []
@@ -387,6 +407,7 @@ def main_loop(config, task_queue, batch_queue):
         .selective_cast(config.DTYPE)
         .to(config.DEVICE)
     )
+    maybe_compile_mixers(model, "(student)")
     optimizer = get_optimizer(config, master_model)
 
     if config.LOAD_MODEL:
@@ -446,6 +467,7 @@ def main_loop(config, task_queue, batch_queue):
         _teacher.eval()
         for _p in _teacher.parameters():
             _p.requires_grad_(False)
+        maybe_compile_mixers(_teacher, "(teacher)")
         print(f"[KD] teacher = {model_path}, {_n_stripped} QAT hooks stripped, lambda = {_kd_lam}")
 
     # Shift-PQ learnable codebook (RWKV_QAT_SHIFT_PQ_LEARN=1): register the codebook Parameter with the

@@ -157,7 +157,7 @@ def run(task_queue, batch_queue):
     import torch
     import numpy as np
     from rwkv.parse_toml import parse_toml
-    from rwkv.train_rwkv import get_optimizer, get_groups, _maybe_enable_determinism
+    from rwkv.train_rwkv import get_optimizer, get_groups, _maybe_enable_determinism, maybe_compile_mixers
     from rwkv.data_fetcher import DataFetcher
     from rwkv.model.srs_model import SrsRWKV
     from rwkv.model import rwkv_model as rwkv_model_mod
@@ -205,6 +205,8 @@ def run(task_queue, batch_queue):
     teacher.eval()
     for _p in teacher.parameters():
         _p.requires_grad_(False)
+    maybe_compile_mixers(model, "(student)")
+    maybe_compile_mixers(teacher, "(teacher)")
 
     shift_cb_param = rwkv_model_mod.shift_pq_init(config.DEVICE)
     optimizer.add_param_group({"params": [shift_cb_param], "lr": config.PEAK_LR, "weight_decay": 0.0})
