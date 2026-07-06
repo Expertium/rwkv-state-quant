@@ -522,6 +522,19 @@ base_drift/comp_cost = qfp32−champ / deploy−qfp32). Rows are chronological.
 | 72-b QUALITY pass, free candidates (2026-07-06 16:46): EMA ckpts + 2-seed weight soup | `q72je/q72be/q72sj/q72sb` | 22 | 72 | 216 | EMA: +0.001829/+0.001666 and +0.001940/+0.000763 — IDENTICAL to raw (±0.0001); soup: +0.0023/+0.0026 and +0.0025/+0.0031 — WORSE, ahead over gate | (q72j/q72b `_ema_6702` ckpts + their own cbs; (q72j+q72b)/2 soup × both cb sets; pure CPU evals, no training) | EMA over a 2-ep cosine-decay tail ≈ the raw endpoint (matches the 352-b finding); soup breaks weight↔codebook co-adaptation | ✗ both free levers dead: **EMA is nil at 72 b too** (2nd confirmation, retire the lever); **2-seed soup HURTS** — averaged weights equilibrate to neither codebook (the co-adapt lesson's 3rd confirmation). The champion stays the raw q72j/q72b checkpoints. Remaining quality levers all cost GPU: m2b12 big-catalog shifts (q72c, RUNNING), 3.0 ep (needs cap lift), 2× train pool |
 | **★★★★★ 72 b via BIG-CATALOG shifts — NEW CHAMPION (2026-07-06 19:59): the joint-cb lesson generalizes to INDEX BITS vs CATALOG SIZE** | **`q72cv`** | 22 | **72** | 216 | **+0.001295/+0.000212 — best sub-100-b result EVER (margins 0.0012/0.0023, both above the seed-noise bar)** | (exact q72j recipe, shift cb swapped m4b6 → m2b12: 2 chunks × 16-dim, 4096 entries/chunk = SAME 48 shift b/card, 64× the catalog; cb global/amortized ~4 MB, k-means init from the champion corpus, learnable) | vs q72jv: imm −0.0006, ahead −0.0014 AT IDENTICAL BITS — per-card cost is INDEX bits, catalog size is free | **✓ THE PRINCIPLE: fewer/bigger chunks + a huge amortized catalog beats the product form — the same discovery that won the WKV side (m1b5 joint), now on shifts. Robustness best of ANY sub-100-b scheme: imm nbad 108/400 (champ pair was 133-142), ahead nbad 106, Q3-ahead quartile NEGATIVE, all quartiles ≤ +0.0018. Seed test q72d (exact recipe, 4321) RUNNING per doctrine. Opens: does m2b8 (256-entry, 32 b) reopen the 56-b rung? does m1b12 (single 32-dim chunk, 4096) go further at 72?** |
 
+**★ WKV SANDWICH ROTATION IS PROVABLY REDUNDANT at m=1 learnable catalogs (analysis, 2026-07-06 ~22:30,
+task23):** the planned "rotate the state before rank-1 factorization" lever adds nothing given the current
+WKV coding. (1) Rotating the state S → R_l·S·R_rᵀ maps rank-1 factors (u,v) → (R_l·u, R_r·v) with the SAME
+σ — the factorization is equivariant, so a sandwich rotation is exactly a pre-rotation of each factor
+direction before quantization. (2) For an m=1 catalog (whole direction as one chunk — m1b5, and joint-uv),
+L2 nearest-centroid matching of R·x against catalog C is IDENTICAL to matching x against RᵀC (orthogonal
+maps preserve L2 + norms), and RᵀC is reachable by the LEARNABLE catalog — gradient co-training absorbs
+any fixed or learned rotation. Rotation only has power when the coding SPLITS dimensions (m ≥ 2 chunks:
+it moves cross-chunk correlation, the SpinQuant story that cracked m4b5 shifts at 64 b). WKV coding is
+m=1 everywhere → **skip the sandwich-rotation build**; the rotation lever's remaining live target is the
+m=2 SHIFT catalog (q72c's m2b12) → staged as the q72f A/B (q72c + RWKV_QAT_SHIFT_ROT=1). Corollary of the
+same argument: joint-uv (q72u) strictly GENERALIZES per-direction m=1 coding + any per-direction rotation.
+
 **★ FREE 16 BITS — the WKV norm is stored TWICE (found 2026-07-04 ~19:40, science-mode restart):** the
 rank-1 split-√σ factors have IDENTICAL norms by construction (`compress_wkv_state`: uf = u·sj, vf =
 (v_un/σ)·sj, both norms = sj = √σ exactly). One scalar per head suffices ⇒ every rank-1 rung's TRUE
