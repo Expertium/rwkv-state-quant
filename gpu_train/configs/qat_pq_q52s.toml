@@ -1,0 +1,40 @@
+# 52-b rung (task22, q52s): BOTH 16-entry walls at once + the full lever stack. JOINT m1b4 WKV cb
+# (16 b, 16-entry — killed AHEAD by +0.0014 at 68 b w/o levers) + m4b4 shifts (32 b, 16-entry —
+# rescued at 56 b BY the levers) + LEARNED PRE-ROTATION + 1-bit norms (4 b) = 52 b/card = 6.5 BYTES.
+# HYPOTHESIS: KD 0.2 is precisely an AHEAD lever (q56r->q56s ahead -0.0019) and anneal keeps small
+# catalogs alive (0 dead centroids at q56s vs 26 re-seeds at q64k) => the same stack that cracked the
+# 16-entry SHIFT wall may crack the 16-entry JOINT-WKV wall.
+TRAIN_USERS_START = 1000
+TRAIN_USERS_END = 2499
+VALIDATE_USERS_START = 101
+VALIDATE_USERS_END = 110
+
+TRAIN_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/train_db_sc8k_1500"
+TRAIN_DATASET_LMDB_SIZE = 80_000_000_000
+VALIDATE_DATASET_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/test_db"
+VALIDATE_DATASET_LMDB_SIZE = 8_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 2_000_000_000
+
+NUM_FETCH_PROCESSES = 4
+MAX_TRAIN_GLOBAL_LEN = 66000
+
+TRAIN_MODE = "D"
+STEP_OFFSET = 1
+WARMUP_STEPS = 0
+EPOCHS = 2.0
+VALIDATE_EVERY = 100000
+PEAK_LR = 1e-3
+
+LOAD_MODEL = true
+LOAD_MODEL_FOLDER = "reference"
+LOAD_MODEL_NAME = "h2k16d_904"
+SAVE_MODEL_FOLDER = "reference"
+SAVE_MODEL_PREFIX = "qat_pq_q52s"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+USE_WANDB = false
+WANDB_PROJECT_NAME = "rwkv"
+WANDB_RESUME = false
+WANDB_RESUME_ID = ""
