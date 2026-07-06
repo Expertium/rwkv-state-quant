@@ -1,0 +1,23 @@
+# GPU eval: q72d (LEARNED joint m1b5 WKV cb + LEARNED m4b6 shifts + modeled 1-bit norms = true 72 b).
+# Penalty vs result/gpuval-fp32*.jsonl (the fixed GPU baseline).
+FILE_AHEAD = "gpuval-q72d"
+FILE_IMM = "gpuval-q72d-P"
+
+MODEL_PATH = "reference/qat_pq_q72d_6702.pth"
+DEVICE = "cuda"
+DTYPE = "bfloat16"
+
+DATASET_LMDB_PATH = "F:/rwkv_lmdb/test_db_5k"
+DATASET_LMDB_SIZE = 250_000_000_000
+LABEL_FILTER_LMDB_PATH = "C:/Users/Andrew/rwkv-anki-autoresearch/label_filter_db"
+LABEL_FILTER_LMDB_SIZE = 40_000_000_000
+
+RAW = false
+RAW_DB_PATH = "raw/result_db"
+RAW_DB_SIZE = 3_000_000_000
+
+USER_START = 0
+USER_END = 0
+USERS_FILE = "val_users.json"
+
+NUM_FETCH_PROCESSES = 5

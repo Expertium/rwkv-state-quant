@@ -91,7 +91,14 @@ def maybe_compile_mixers(model, label=""):
     wrapping the Module so parameter names stay intact (copy_downcast_ / master-child grad matching
     depend on them). First few steps pay compile latency per new shape family; dynamic=True keeps
     recompiles bounded across the variable-length buckets."""
-    if os.environ.get("RWKV_QAT_COMPILE", "") != "1":
+    # RWKV_QAT_COMPILE=1/all -> compile student AND teacher; =student -> student only (round-3 A/B:
+    # the compiled no_grad TEACHER got 177 ms/step SLOWER — dynamo guard overhead without a backward
+    # to amortize it — while the student won 231 ms across fwd+bwd).
+    _mode = os.environ.get("RWKV_QAT_COMPILE", "")
+    if _mode not in ("1", "all", "student"):
+        return model
+    if _mode == "student" and "teacher" in label:
+        print(f"[compile] skipping {label} (RWKV_QAT_COMPILE=student)")
         return model
     from rwkv.model import rwkv_model as _rm
     n = 0
