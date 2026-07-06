@@ -48,6 +48,15 @@ def _maybe_enable_determinism():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True, warn_only=True)
+    # RWKV_QAT_NO_MEMFILL=1 (default off): deterministic mode also NaN-fills EVERY freshly
+    # allocated tensor (torch.utils.deterministic.fill_uninitialized_memory, a debug aid to
+    # surface uninitialized reads — NOT part of the algorithm-determinism guarantee). Trace
+    # attribution (2026-07-06): that fill is ~73k of the 92k fill_ launches per 8 steps ≈ 9k
+    # launches/step ≈ 25% of the launch-bound step's kernel storm. Disabling changes NOTHING
+    # for correct code (empty buffers are always overwritten before use); flag-gated anyway.
+    if os.environ.get("RWKV_QAT_NO_MEMFILL", "") == "1":
+        torch.utils.deterministic.fill_uninitialized_memory = False
+        print("[determinism] fill_uninitialized_memory OFF (RWKV_QAT_NO_MEMFILL=1)")
     print("[determinism] training-process RNG + cuBLAS/cuDNN pinned (augmentation seed set separately)")
 
 
