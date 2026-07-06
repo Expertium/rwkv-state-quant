@@ -9,6 +9,9 @@ for /L %%i in (1,1,2400) do (
   timeout /t 30 /nobreak >nul
 )
 :run
+REM Windows inductor needs MSVC cl.exe on PATH for host-side codegen (first attempt died with
+REM "Compiler: cl is not found") -- load the VS 2022 Community x64 environment.
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
 set LOG=C:\Users\Andrew\rwkv-state-quant\scratchpad\profile_qat_fast3.log
 set PYTHONPATH=C:\Users\Andrew\rwkv-state-quant\gpu_train
 set PYTHONUNBUFFERED=1
