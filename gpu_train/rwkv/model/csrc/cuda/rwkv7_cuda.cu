@@ -310,6 +310,9 @@ __constant__ int c_pq_ncent = 0;
 // per head selects BOTH factor directions, each half rescaled by its own (quantized) norm. subdim=2K,
 // layout g_pq_cb[c*subdim + j] (no role blocks). Mirror of engine PqCodebook::encode_decode_joint.
 __constant__ int c_pq_joint = 0;
+// task24: warm-started joint search (previous step's pick primes the pruning bound). Provably
+// pick-identical; RWKV_QAT_NO_WARM=1 (read at codebook upload) disables it for bitwise A/B / fallback.
+__constant__ int c_pq_warm = 1;
 __device__ float g_pq_cb[32768];   // grown 8192 -> 32768 for joint-uv (ncent<=1024 x subdim 32)
 // ---- NORM QUANT for the PQ branch (train==deploy analog of engine RWKV_PQ_NORM_BITS): reconstruct with
 // the factor norm quantized to n bits, log2-uniform over [c_nq_lo, c_nq_hi] octaves; centroid MATCHING
@@ -368,9 +371,13 @@ __device__ inline void pq_encode_decode(int role, float* col, int K) {
 // return value is this thread's rank-1 reconstruction entry recon[x][y] = uf_q[x]*vf_q[y]. HALF-AWAY
 // rounding (roundf) to match Rust f64::round. All threads call it (it has __syncthreads inside).
 // rec_idx/rec_norm (nullable): learnable-codebook recording — the PQ branch writes the 2m selected
-// centroid indices (rec_idx[role*m+p], -1 = column not quantized) and the 2 reconstruction norms. ----
+// centroid indices (rec_idx[role*m+p], -1 = column not quantized) and the 2 reconstruction norms.
+// warm (nullable, joint path only): per-thread register carrying the PREVIOUS step's winning joint
+// centroid across the caller's sequential t-loop (-1 = none). The state drifts slowly step-to-step,
+// so it is a near-optimal distance bound that lets the scan prune most of the 1024-entry catalog.
+// Provably pick-identical to the full scan (see the joint branch). Uniform across the block. ----
 __device__ inline float qat_lr_rank1(float a_val, int K, float qmax, int* rec_idx = nullptr,
-                                     float* rec_norm = nullptr) {
+                                     float* rec_norm = nullptr, int* warm = nullptr) {
     const int x = threadIdx.y, y = threadIdx.x;
     const int tid = x * blockDim.x + y;
     const int nthreads = blockDim.x * blockDim.y;
@@ -486,13 +493,32 @@ __device__ inline float qat_lr_rank1(float a_val, int K, float qmax, int* rec_id
                 float qu = (c_nq_levels > 0.f) ? nq_quant_norm(nu) : nu;
                 float qv = (c_nq_levels > 0.f) ? nq_quant_norm(nv) : nv;
                 if (rec_norm != nullptr && tid == 0) { rec_norm[0] = qu; rec_norm[1] = qv; }
+                // Warm-started, partial-distance-pruned scan (task24). Candidate order per thread:
+                // the previous step's winner wc first (ALL threads, exact bound), then this thread's
+                // stride share. ONE loop body -> one FP compilation -> the warm bound is bit-equal to
+                // what the plain scan computes for that centroid. PICK-IDENTICAL to the serial scan:
+                // (a) the survival predicate below equals the update predicate, (b) d is a monotone
+                // non-decreasing sum of squares, so a pruned candidate's final d can never satisfy it,
+                // (c) (d, then lower c) tie order == the serial first-strict-min semantics.
+                const int wc = (warm != nullptr && c_pq_warm) ? *warm : -1;
                 float bd = INFINITY; int bi = 0x7fffffff;
-                for (int c = tid; c < c_pq_ncent; c += nthreads) {
+                for (int s = (wc >= 0 ? -1 : tid); s < c_pq_ncent; s = (s < 0 ? tid : s + nthreads)) {
+                    const int c = (s < 0) ? wc : s;
+                    if (s >= 0 && c == wc) continue;           // warm already scanned at s == -1
                     const float* cc = &g_pq_cb[c * c_pq_subdim];
                     float d = 0.f;
-                    for (int j = 0; j < K; j++) { float diff = ufq[j] * iu - cc[j]; d += diff * diff; }
-                    for (int j = 0; j < K; j++) { float diff = vfq[j] * iv - cc[K + j]; d += diff * diff; }
-                    if (d < bd) { bd = d; bi = c; }
+                    bool alive = true;
+                    for (int j0 = 0; j0 < K && alive; j0 += 8) {   // u-half, prune every 8 dims
+                        const int je = (j0 + 8 < K) ? j0 + 8 : K;
+                        for (int j = j0; j < je; j++) { float diff = ufq[j] * iu - cc[j]; d += diff * diff; }
+                        alive = (d < bd) || (d == bd && c < bi);
+                    }
+                    for (int j0 = 0; j0 < K && alive; j0 += 8) {   // v-half (same serial-scan order)
+                        const int je = (j0 + 8 < K) ? j0 + 8 : K;
+                        for (int j = j0; j < je; j++) { float diff = vfq[j] * iv - cc[K + j]; d += diff * diff; }
+                        alive = (d < bd) || (d == bd && c < bi);
+                    }
+                    if (alive) { bd = d; bi = c; }             // final alive == update predicate
                 }
                 for (int o = 16; o > 0; o >>= 1) {             // warp argmin (same as the role path)
                     float od = __shfl_down_sync(FULL_MASK, bd, o);
@@ -516,6 +542,7 @@ __device__ inline float qat_lr_rank1(float a_val, int K, float qmax, int* rec_id
                     vfq[tid] = g_pq_cb[sc_best * c_pq_subdim + K + tid] * qv;
                 }
                 __syncthreads();                               // write-back + red/s_bidx reuse fence
+                if (warm != nullptr) *warm = sc_best;          // every thread updates its own register
             }
             return ufq[x] * vfq[y];
         }
@@ -878,6 +905,7 @@ __global__ void rwkv7_wkv_qat_lr_forward_kernel(
     const int b = blockIdx.x, h = blockIdx.y;
     const int x = threadIdx.y, y = threadIdx.x;
     float st = 0.0f;                                       // this thread's carried (truncated) state entry
+    int warm_joint = -1;                                   // previous step's joint-cb pick (block-uniform)
     int64_t global_y = get_index3(b, 0, h, y, T, H, K);
     int64_t global_x = get_index3(b, 0, h, x, T, H, K);
     for (int t = 0; t < T; t++) {
@@ -906,7 +934,7 @@ __global__ void rwkv7_wkv_qat_lr_forward_kernel(
         if (skip) {
             st = in_st;
         } else {
-            st = qat_lr_rank1(ns, K, qmax);                // rank-1 int-N truncation (STE forward)
+            st = qat_lr_rank1(ns, K, qmax, nullptr, nullptr, &warm_joint);  // rank-1 int-N truncation (STE forward)
         }
         global_x += H * K;
         global_y += H * K;
@@ -951,6 +979,8 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
     }
 
     float dS_xy_contrib = 0.0;
+    int warm_joint = -1;  // joint-cb warm pick: chunks recompute in reverse order, but any previously
+                          // selected centroid is an EXACT distance bound, so correctness is unaffected
     for (int l = L - 1; l >= 0; l--) {
         // recompute states from the checkpoint, re-applying the rank-1 truncation each step
         float state_xy = state_checkpoints_BLHKK[get_index4(b, l, h, x, y, L, H, K, K)];
@@ -983,7 +1013,8 @@ __global__ void rwkv7_wkv_qat_lr_backward_kernel(
             } else {
                 state_xy = qat_lr_rank1(state_xy, K, qmax, // re-apply truncation (block-uniform branch)
                     c_pq_learn ? &rec_idx_chunk[c * 8] : nullptr,
-                    c_pq_learn ? &rec_norm_chunk[c * 2] : nullptr);
+                    c_pq_learn ? &rec_norm_chunk[c * 2] : nullptr,
+                    &warm_joint);
             }
         }
 
@@ -1139,6 +1170,9 @@ void rwkv7_set_pq_codebook_cuda(const at::Tensor& cb_flat, int64_t m, int64_t su
     cudaMemcpyToSymbol(c_pq_subdim, &si, sizeof(int));
     cudaMemcpyToSymbol(c_pq_ncent, &ni, sizeof(int));
     cudaMemcpyToSymbol(c_pq_joint, &ji, sizeof(int));
+    const char* nw = getenv("RWKV_QAT_NO_WARM");           // task24 escape hatch: disable the
+    int wa = (nw != nullptr && nw[0] == '1') ? 0 : 1;      // warm-started joint search (bitwise A/B)
+    cudaMemcpyToSymbol(c_pq_warm, &wa, sizeof(int));
     if (active) {
         auto cbf = cb_flat.to(torch::kFloat32).to(torch::kCPU).contiguous();
         size_t n = (size_t)cbf.numel();

@@ -535,6 +535,34 @@ never flip flags inside a comparison family). Remaining speed levers: CUDA graph
 shows ~128k cudaLaunchKernel = 19.7% CPU), joint-uv search tiling (−17% throughput on the new champion
 recipe), cdist/index_put fusion.
 
+**★★ QAT SPEED ROUND 5 — WARM-STARTED JOINT SEARCH (2026-07-07 ~15:00, task24): the joint-uv search
+premium HALVED in-kernel, and the next champion-family training measured at ~1.14 st/s vs the historical
+0.80 (+40%).** The lever: `qat_lr_rank1`'s joint branch now warm-starts the 1024-entry catalog scan with
+the PREVIOUS step's winning centroid (the LR kernels are sequential over t per (b,h) block and the state
+drifts slowly, so it is a near-optimal distance bound) + monotone partial-distance pruning (d is a sum of
+squares → non-decreasing → any candidate whose partial sum fails the update predicate can never win) + an
+explicit (d, then lower c) tie rule equal to the serial first-strict-min. **Provably PICK-IDENTICAL**, by
+construction: warm candidate and scan share ONE loop body (one FP compilation), so the bound is bit-equal
+to the scan's own distance for that centroid. Verified: (a) bitwise A/B `scratchpad/warm_ab_test.py` —
+16k+ warm-chained searches, fwd out + all 6 input grads BITWISE equal warm-on vs `RWKV_QAT_NO_WARM=1`
+(escape-hatch env, read at codebook upload), cb-grad maxREL 1.5e-07 (atomicAdd order only); (b)
+`parity_lr_juv.py` 32/32 with UNCHANGED maxREL (2.649e-07/1.090e-07) → picks identical to the f64
+reference. MEASUREMENTS (same fast4 harness, only the WKV cb swapped m1b5→juv_b10, tag `_juv`/`_juv2`):
+joint premium isolated = lr_fwd 1.41→6.10 ms/call, lr_bwd 2.57→7.11 (product→joint, +166 ms/step, LR
+kernels = 33% of step); with warm-start lr_fwd →3.75 (−38%), lr_bwd →4.80 (−32%), hard phase −44/−37% =
+LR total 238→154 ms/step. END-TO-END probes (real train_rwkv, exact q72u champion env, seed 1234,
+`qat_speedprobe` prefix, killed after sampling): probe A (warm kernel only) print-#1 0.8743 st/s vs
+q72u's print-#1 0.7996 on the IDENTICAL step window = **+9.3% from the kernel alone**; probe B (+ the
+round-4 flag set) steady-state **1.144/1.142 st/s** (two samples, 90/120 s) ≈ 875 ms/step → a 2.0-ep
+champion-recipe run drops ~3.7 h → ~2.6 h. **CUDA GRAPHS: CLOSED as not-viable at current batch
+geometry** — juv2 CPU table still shows ~16.7k launches/step ≈ 207 ms CPU, but `reduce-overhead` skips
+cudagraphs on dynamic shapes and manual capture needs a graph per (B,T) signature (per-batch-unique →
+recapture every step = net loss); the only route is bucketing/padding the data pipeline (trajectory-
+perturbing, modest ceiling, smaller still in the champion family which has NO KD teacher) — not worth it.
+cdist/index_put: the champion stack's m2b12 encode is matmul-class GPU work (row-chunked cdist), already
+fine; FAST_EMB covers ncent≤256 paths. Speed block DONE — production stack for the next family =
+warm-start kernel + `ROT_CACHE`+`FAST_EMB`+`EMA_FOREACH`+`NO_MEMFILL`+`COMPILE=student`.
+
 **⚠ OPS INCIDENT (2026-07-07 06:19, recovered): GPU-eval wait-window FALL-THROUGH cascaded a false
 verdict.** The `run_gpu_eval_*.cmd` waiters polled 960×30 s = 8 h then FELL THROUGH to :run; q72f's
 (launched 22:18, training only started 04:29) expired at 06:19 → GPU eval crashed on the missing

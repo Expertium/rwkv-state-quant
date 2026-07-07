@@ -23,7 +23,9 @@ TAG = os.environ.get("RWKV_PROFILE_TAG", "")
 # --- env: EXACT q56s lever stack. MUST precede any rwkv import (module-level env reads). ---
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 os.environ.update({
-    "RWKV_QAT_PQ": os.path.join(SCRATCH, "pq_cb_m1b5.txt"),
+    # RWKV_PROFILE_PQ: override the WKV codebook (default = the q56s product m1b5) so the SAME
+    # harness can A/B the joint-uv catalog cost (everything else in the lever stack held fixed).
+    "RWKV_QAT_PQ": os.environ.get("RWKV_PROFILE_PQ", os.path.join(SCRATCH, "pq_cb_m1b5.txt")),
     "RWKV_QAT_PQ_LEARN": "1",
     "RWKV_QAT_SHIFT_PQ": os.path.join(SCRATCH, "pq_cb_shift_m4b4.txt"),
     "RWKV_QAT_SHIFT_PQ_LEARN": "1",
@@ -125,7 +127,8 @@ def make_step(config, master_model, model, teacher, optimizer, scheduler,
                 gn = p.grad.detach().float().view(_r2 * _m, _nc, _sd).norm(dim=-1)
             else:
                 _m, _sd, _nc = rwkv_ops_mod._PQ_META[0], rwkv_ops_mod._PQ_META[1], rwkv_ops_mod._PQ_META[2]
-                gn = p.grad.detach().float().view(2 * _m, _nc, _sd).norm(dim=-1)
+                _jt = rwkv_ops_mod._PQ_META[5] if len(rwkv_ops_mod._PQ_META) > 5 else 0
+                gn = p.grad.detach().float().view((1 if _jt else 2 * _m), _nc, _sd).norm(dim=-1)
             ema = res_ema.get(name)
             res_ema[name] = gn.clone() if ema is None else RES_DECAY * ema + (1 - RES_DECAY) * gn
         optimizer.zero_grad()
