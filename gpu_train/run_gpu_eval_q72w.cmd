@@ -1,10 +1,12 @@
 @echo off
 REM Serial queue: q72w GPU eval (learned joint m1b5 + learned m4b6 + 1-bit norms), after the q72w TRAINING.
 cd /d C:\Users\Andrew\rwkv-state-quant\gpu_train
-for /L %%i in (1,1,960) do (
+for /L %%i in (1,1,2400) do (
   findstr /C:"DONE_EXIT" "C:\Users\Andrew\rwkv-state-quant\scratchpad\qat_qat_pq_q72w.log" >nul 2>&1 && goto :run
   timeout /t 30 /nobreak >nul
 )
+goto :eof
+REM window expired: die silently - the verdict chain's own 25-h timeout reports the abort
 :run
 set LOG=C:\Users\Andrew\rwkv-state-quant\scratchpad\gpu_eval_q72w.log
 set PYTHONPATH=C:\Users\Andrew\rwkv-state-quant\gpu_train
