@@ -563,6 +563,16 @@ cdist/index_put: the champion stack's m2b12 encode is matmul-class GPU work (row
 fine; FAST_EMB covers ncent≤256 paths. Speed block DONE — production stack for the next family =
 warm-start kernel + `ROT_CACHE`+`FAST_EMB`+`EMA_FOREACH`+`NO_MEMFILL`+`COMPILE=student`.
 
+**★ PORTED TO THE PARENT REPO (2026-07-07 ~15:45, Andrew's order — the no-modify constraint lifted for
+this scoped port): the full QAT + quantization stack (CUDA + Rust) landed in rwkv-anki-autoresearch
+@1d3b5b8**, updating its 07-03 snapshot to today's state: joint-uv kernel branch + norm quant +
+learnable WKV cb + warm-start search + the rwkv_ops/rwkv_model/srs_model(kd)/train_rwkv wiring
+(train_rwkv was a GRAFT — the parent's own bench/profile/step-trace/Wilcoxon-prune/RWKV_COMPILE infra
+preserved), the engine joint/norm/warm stack, and the pq_train{,_shift,_juv} catalog trainers. Verified
+in the parent: builds clean (pyd sm_89 + cargo), parity_lr_juv 32/32 (same maxRELs), imports OK, and the
+parent-built engine reproduces the q72u champion eval BYTE-IDENTICAL (user 6436). Untouched by design:
+the parent's get_result.py (its own eval-sharding track) and its d=128/5k research files.
+
 **⚠ OPS INCIDENT (2026-07-07 06:19, recovered): GPU-eval wait-window FALL-THROUGH cascaded a false
 verdict.** The `run_gpu_eval_*.cmd` waiters polled 960×30 s = 8 h then FELL THROUGH to :run; q72f's
 (launched 22:18, training only started 04:29) expired at 06:19 → GPU eval crashed on the missing
