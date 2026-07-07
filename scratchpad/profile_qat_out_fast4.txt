@@ -1,0 +1,138 @@
+[profile] 31 batches enqueued (4 fetch procs), device=cuda
+[profile] speed flags: {'RWKV_QAT_ROT_CACHE': '1', 'RWKV_QAT_FAST_EMB': '1', 'RWKV_QAT_EMA_FOREACH': '1'}
+
+===== SEGMENT SPLIT (soft anneal phase, mean over 5 steps, synced) =====
+  student_fwd             446.9 ms  ( 48.9%)
+  backward                337.6 ms  ( 36.9%)
+  teacher_fwd              99.5 ms  ( 10.9%)
+  xfer_clip_optstep        23.9 ms  (  2.6%)
+  copy_downcast             3.3 ms  (  0.4%)
+  ema_sched                 1.8 ms  (  0.2%)
+  resurrect_zero            0.7 ms  (  0.1%)
+  TOTAL                   913.7 ms   (wall mean 926.2 ms)
+
+===== PROFILER soft phase: top 30 by CUDA total =====
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+autograd::engine::evaluate_function: CompiledFunctio...         0.89%      61.906ms        37.87%        2.639s       1.995ms       0.000us         0.00%     782.681ms     591.595us          1323  
+                               CompiledFunctionBackward         1.39%      96.751ms        35.09%        2.445s       1.848ms       0.000us         0.00%     768.424ms     580.819us          1323  
+autograd::engine::evaluate_function: RWKV7_WKV_QAT_L...         0.04%       3.100ms         0.22%      15.115ms     104.962us       0.000us         0.00%     369.909ms       2.569ms           144  
+                               RWKV7_WKV_QAT_LRBackward         0.05%       3.412ms         0.17%      12.014ms      83.431us       0.000us         0.00%     369.909ms       2.569ms           144  
+                  rwkv::rwkv7_wkv_qat_lr_backward_float         0.02%       1.718ms         0.12%       8.603ms      59.740us     369.909ms        15.53%     369.909ms       2.569ms           144  
+_ZN4rwkv32rwkv7_wkv_qat_lr_backward_kernelILi32EfEEv...         0.00%       0.000us         0.00%       0.000us       0.000us     369.909ms        15.53%     369.909ms       2.569ms           144  
+autograd::engine::evaluate_function: RWKV7_WKVBackwa...         0.10%       7.155ms         4.58%     319.408ms       1.558ms       0.000us         0.00%     287.178ms       1.401ms           205  
+                                      RWKV7_WKVBackward         0.06%       4.340ms         4.33%     302.028ms       1.473ms       0.000us         0.00%     279.388ms       1.363ms           205  
+                      rwkv::rwkv7_wkv_backward_bfloat16         0.06%       3.998ms         4.27%     297.688ms       1.452ms     279.388ms        11.73%     279.388ms       1.363ms           205  
+                                               aten::mm        11.93%     831.072ms        18.70%        1.303s      48.470us     273.417ms        11.48%     273.457ms      10.170us         26888  
+_Z45rwkv7_wkv_backward_time_parallel_final_kernelILi...         0.00%       0.000us         0.00%       0.000us       0.000us     223.424ms         9.38%     223.424ms       1.862ms           120  
+                                       aten::index_put_         0.02%       1.550ms         4.82%     336.183ms     379.011us       0.000us         0.00%     220.654ms     248.765us           887  
+                                 aten::_index_put_impl_         0.73%      50.816ms         4.80%     334.633ms     377.264us     200.578ms         8.42%     220.654ms     248.765us           887  
+                                        aten::index_add         0.20%      14.150ms         4.45%     310.185ms     448.243us       0.000us         0.00%     219.458ms     317.136us           692  
+                             Torch-Compiled Region: 1/0         0.21%      14.549ms         1.64%     114.304ms     793.778us       0.000us         0.00%     208.421ms       1.447ms           144  
+                                       RWKV7_WKV_QAT_LR         0.04%       2.534ms         0.42%      28.936ms     200.947us       0.000us         0.00%     203.093ms       1.410ms           144  
+                             Torch-Compiled Region: 2/0         0.12%       8.118ms         0.34%      23.359ms     162.218us       0.000us         0.00%     203.093ms       1.410ms           144  
+                   rwkv::rwkv7_wkv_qat_lr_forward_float         0.02%       1.132ms         0.09%       6.338ms      44.012us     203.093ms         8.52%     203.093ms       1.410ms           144  
+_ZN4rwkv31rwkv7_wkv_qat_lr_forward_kernelILi32EfEEvi...         0.00%       0.000us         0.00%       0.000us       0.000us     203.093ms         8.52%     203.093ms       1.410ms           144  
+                                              RWKV7_WKV         0.20%      13.788ms         1.52%     105.699ms     190.792us       0.000us         0.00%     195.954ms     353.708us           554  
+                       rwkv::rwkv7_wkv_forward_bfloat16         0.09%       6.193ms         1.21%      83.972ms     151.574us     195.954ms         8.22%     195.954ms     353.708us           554  
+## Call CompiledFxGraph f2454qf6srxc67rnoxyxzk5tt7uk...         2.05%     142.974ms         6.72%     468.193ms       3.251ms       0.000us         0.00%     192.062ms       1.334ms           144  
+_ZN44_GLOBAL__N__99c14716_11_Indexing_cu_2a2c434e37i...         0.00%       0.000us         0.00%       0.000us       0.000us     184.124ms         7.73%     184.124ms     263.788us           698  
+                                       CompiledFunction         1.35%      94.076ms        26.52%        1.848s       1.397ms       0.000us         0.00%     157.600ms     119.123us          1323  
+## Call CompiledFxGraph fynffu7cjnywrgbfxf5vppmvixsn...         0.82%      57.427ms         3.26%     227.341ms       1.142ms       0.000us         0.00%     136.385ms     685.354us           199  
+## Call CompiledFxGraph fc5ee7fycbgyzxvbfmzbdxsaiupa...         0.68%      47.211ms         1.51%     105.408ms     529.689us       0.000us         0.00%     130.907ms     657.826us           199  
+                             Torch-Compiled Region: 0/1         0.09%       6.193ms         3.81%     265.456ms       4.424ms       0.000us         0.00%     107.781ms       1.796ms            60  
+triton_red_fused_mul_native_group_norm_native_group_...         0.08%       5.271ms         0.15%      10.166ms      29.639us     106.470ms         4.47%     106.470ms     310.408us           343  
+triton_red_fused_mul_native_group_norm_native_group_...         0.00%       0.000us         0.00%       0.000us       0.000us     106.470ms         4.47%     106.470ms     310.408us           343  
+_Z44rwkv7_wkv_forward_time_parallel_final_kernelILi3...         0.00%       0.000us         0.00%       0.000us       0.000us     101.458ms         4.26%     101.458ms     533.991us           190  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 6.968s
+Self CUDA time total: 2.382s
+
+
+===== PROFILER soft phase: top 15 by CPU total =====
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+autograd::engine::evaluate_function: CompiledFunctio...         0.89%      61.906ms        37.87%        2.639s       1.995ms       0.000us         0.00%     782.681ms     591.595us          1323  
+                               CompiledFunctionBackward         1.39%      96.751ms        35.09%        2.445s       1.848ms       0.000us         0.00%     768.424ms     580.819us          1323  
+                                       CompiledFunction         1.35%      94.076ms        26.52%        1.848s       1.397ms       0.000us         0.00%     157.600ms     119.123us          1323  
+                                               aten::mm        11.93%     831.072ms        18.70%        1.303s      48.470us     273.417ms        11.48%     273.457ms      10.170us         26888  
+                                       cudaLaunchKernel        13.24%     922.306ms        13.24%     922.306ms      11.680us       0.000us         0.00%       0.000us       0.000us         78964  
+                                         cuLaunchKernel        10.62%     740.144ms        10.63%     740.864ms      13.600us       0.000us         0.00%       2.880us       0.000us         54477  
+## Call CompiledFxGraph f33pwbalf7x3qqlsvl5qcl4kj4dr...         8.86%     617.587ms        10.31%     718.685ms       4.991ms       0.000us         0.00%      26.387ms     183.240us           144  
+                             Torch-Compiled Region: 0/3         0.09%       6.128ms         9.68%     674.252ms      12.259ms       0.000us         0.00%      38.161ms     693.830us            55  
+## Call CompiledFxGraph f2454qf6srxc67rnoxyxzk5tt7uk...         2.05%     142.974ms         6.72%     468.193ms       3.251ms       0.000us         0.00%     192.062ms       1.334ms           144  
+## Call CompiledFxGraph ft6xd23meqlktauh32j5onww6auv...         1.97%     137.550ms         6.45%     449.680ms       3.306ms       0.000us         0.00%      69.320ms     509.708us           136  
+## Call CompiledFxGraph fabishovghiamv2qnhw74gccd4qj...         1.87%     130.014ms         5.92%     412.508ms       5.428ms       0.000us         0.00%      67.413ms     887.008us            76  
+                                           aten::linear         0.35%      24.516ms         5.40%     375.986ms      67.648us       0.000us         0.00%      45.299ms       8.150us          5558  
+                                       aten::index_put_         0.02%       1.550ms         4.82%     336.183ms     379.011us       0.000us         0.00%     220.654ms     248.765us           887  
+                                 aten::_index_put_impl_         0.73%      50.816ms         4.80%     334.633ms     377.264us     200.578ms         8.42%     220.654ms     248.765us           887  
+                                               cudaFree         4.68%     326.158ms         4.68%     326.158ms     394.386us       0.000us         0.00%       0.000us       0.000us           827  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 6.968s
+Self CUDA time total: 2.382s
+
+
+===== PROFILER hard phase: top 30 by CUDA total =====
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+autograd::engine::evaluate_function: CompiledFunctio...         0.64%      45.466ms        22.21%        1.569s       1.418ms       0.000us         0.00%     612.278ms     553.597us          1106  
+                               CompiledFunctionBackward         1.12%      78.796ms        20.25%        1.430s       1.293ms       0.000us         0.00%     601.552ms     543.899us          1106  
+autograd::engine::evaluate_function: RWKV7_WKV_QAT_L...         0.05%       3.568ms         0.24%      17.181ms     112.292us       0.000us         0.00%     365.842ms       2.391ms           153  
+                               RWKV7_WKV_QAT_LRBackward         0.05%       3.586ms         0.19%      13.613ms      88.972us       0.000us         0.00%     365.842ms       2.391ms           153  
+                  rwkv::rwkv7_wkv_qat_lr_backward_float         0.03%       1.961ms         0.14%      10.027ms      65.534us     365.842ms        14.42%     365.842ms       2.391ms           153  
+_ZN4rwkv32rwkv7_wkv_qat_lr_backward_kernelILi32EfEEv...         0.00%       0.000us         0.00%       0.000us       0.000us     365.842ms        14.42%     365.842ms       2.391ms           153  
+autograd::engine::evaluate_function: RWKV7_WKVBackwa...         0.12%       8.413ms         4.61%     325.276ms       1.459ms       0.000us         0.00%     296.755ms       1.331ms           223  
+                                      RWKV7_WKVBackward         0.07%       4.720ms         4.33%     305.619ms       1.370ms       0.000us         0.00%     288.568ms       1.294ms           223  
+                      rwkv::rwkv7_wkv_backward_bfloat16         0.05%       3.773ms         4.26%     300.899ms       1.349ms     288.568ms        11.38%     288.568ms       1.294ms           223  
+                                       aten::index_put_         0.03%       1.828ms         5.07%     358.301ms     377.955us       0.000us         0.00%     235.503ms     248.421us           948  
+                                 aten::_index_put_impl_         0.76%      53.478ms         5.05%     356.473ms     376.026us     214.472ms         8.46%     235.503ms     248.421us           948  
+                                               aten::mm        11.58%     817.723ms        17.76%        1.255s      51.079us     232.578ms         9.17%     232.601ms       9.471us         24560  
+_Z45rwkv7_wkv_backward_time_parallel_final_kernelILi...         0.00%       0.000us         0.00%       0.000us       0.000us     228.809ms         9.02%     228.809ms       1.774ms           129  
+                                        aten::index_add         0.17%      12.190ms         3.70%     261.266ms     444.330us       0.000us         0.00%     222.318ms     378.092us           588  
+                             Torch-Compiled Region: 1/0         0.24%      16.839ms         1.78%     125.779ms     822.084us       0.000us         0.00%     208.060ms       1.360ms           153  
+                                              RWKV7_WKV         0.22%      15.366ms         1.50%     106.050ms     177.045us       0.000us         0.00%     204.379ms     341.201us           599  
+                       rwkv::rwkv7_wkv_forward_bfloat16         0.09%       6.363ms         1.16%      82.185ms     137.204us     204.379ms         8.06%     204.379ms     341.201us           599  
+                                       RWKV7_WKV_QAT_LR         0.04%       2.964ms         0.44%      31.298ms     204.562us       0.000us         0.00%     203.168ms       1.328ms           153  
+                             Torch-Compiled Region: 2/0         0.12%       8.462ms         0.35%      24.838ms     162.342us       0.000us         0.00%     203.168ms       1.328ms           153  
+                   rwkv::rwkv7_wkv_qat_lr_forward_float         0.02%       1.190ms         0.09%       6.673ms      43.616us     203.168ms         8.01%     203.168ms       1.328ms           153  
+_ZN4rwkv31rwkv7_wkv_qat_lr_forward_kernelILi32EfEEvi...         0.00%       0.000us         0.00%       0.000us       0.000us     203.168ms         8.01%     203.168ms       1.328ms           153  
+## Call CompiledFxGraph f2454qf6srxc67rnoxyxzk5tt7uk...         2.17%     153.199ms         7.10%     501.350ms       3.256ms       0.000us         0.00%     202.270ms       1.313ms           154  
+_ZN44_GLOBAL__N__99c14716_11_Indexing_cu_2a2c434e37i...         0.00%       0.000us         0.00%       0.000us       0.000us     196.939ms         7.76%     196.939ms     261.887us           752  
+## Call CompiledFxGraph fynffu7cjnywrgbfxf5vppmvixsn...         0.88%      61.818ms         3.47%     245.160ms       1.156ms       0.000us         0.00%     144.606ms     682.103us           212  
+## Call CompiledFxGraph fc5ee7fycbgyzxvbfmzbdxsaiupa...         0.72%      50.684ms         1.61%     113.682ms     536.237us       0.000us         0.00%     133.738ms     630.839us           212  
+triton_red_fused_mul_native_group_norm_native_group_...         0.05%       3.340ms         0.09%       6.228ms      29.379us     105.675ms         4.17%     105.675ms     498.465us           212  
+triton_red_fused_mul_native_group_norm_native_group_...         0.00%       0.000us         0.00%       0.000us       0.000us     105.675ms         4.17%     105.675ms     498.465us           212  
+                                       CompiledFunction         1.02%      71.690ms        12.72%     898.588ms     812.466us       0.000us         0.00%     100.997ms      91.317us          1106  
+_Z44rwkv7_wkv_forward_time_parallel_final_kernelILi3...         0.00%       0.000us         0.00%       0.000us       0.000us      99.807ms         3.93%      99.807ms     542.429us           184  
+                             Torch-Compiled Region: 7/0         0.05%       3.776ms         0.62%      43.945ms     207.289us       0.000us         0.00%      87.941ms     414.816us           212  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 7.063s
+Self CUDA time total: 2.537s
+
+
+===== PROFILER hard phase: top 15 by CPU total =====
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                                                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg     Self CUDA   Self CUDA %    CUDA total  CUDA time avg    # of Calls  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+autograd::engine::evaluate_function: CompiledFunctio...         0.64%      45.466ms        22.21%        1.569s       1.418ms       0.000us         0.00%     612.278ms     553.597us          1106  
+                               CompiledFunctionBackward         1.12%      78.796ms        20.25%        1.430s       1.293ms       0.000us         0.00%     601.552ms     543.899us          1106  
+                                       cudaLaunchKernel        19.33%        1.365s        19.36%        1.367s      12.047us       0.000us         0.00%      13.600us       0.000us        113502  
+                                               aten::mm        11.58%     817.723ms        17.76%        1.255s      51.079us     232.578ms         9.17%     232.601ms       9.471us         24560  
+                                       CompiledFunction         1.02%      71.690ms        12.72%     898.588ms     812.466us       0.000us         0.00%     100.997ms      91.317us          1106  
+                                         cuLaunchKernel         8.63%     609.445ms         8.63%     609.445ms      13.936us       0.000us         0.00%       0.000us       0.000us         43732  
+                                           aten::linear         0.50%      35.637ms         7.94%     560.550ms      69.685us       0.000us         0.00%      57.871ms       7.194us          8044  
+## Call CompiledFxGraph f2454qf6srxc67rnoxyxzk5tt7uk...         2.17%     153.199ms         7.10%     501.350ms       3.256ms       0.000us         0.00%     202.270ms       1.313ms           154  
+                                           aten::matmul         0.59%      41.871ms         6.26%     441.997ms      63.652us       0.000us         0.00%      54.374ms       7.830us          6944  
+                                       aten::index_put_         0.03%       1.828ms         5.07%     358.301ms     377.955us       0.000us         0.00%     235.503ms     248.421us           948  
+                                 aten::_index_put_impl_         0.76%      53.478ms         5.05%     356.473ms     376.026us     214.472ms         8.46%     235.503ms     248.421us           948  
+                             Torch-Compiled Region: 6/6         0.13%       9.372ms         4.98%     351.752ms       2.426ms       0.000us         0.00%      37.142ms     256.154us           145  
+## Call CompiledFxGraph fc5mla7lm6xergkk4mbqkwm2slyz...         1.81%     127.683ms         4.66%     328.958ms       2.269ms       0.000us         0.00%      37.142ms     256.154us           145  
+autograd::engine::evaluate_function: RWKV7_WKVBackwa...         0.12%       8.413ms         4.61%     325.276ms       1.459ms       0.000us         0.00%     296.755ms       1.331ms           223  
+                                               cudaFree         4.60%     325.020ms         4.60%     325.020ms     388.315us       0.000us         0.00%       0.000us       0.000us           837  
+-------------------------------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  ------------  
+Self CPU time total: 7.063s
+Self CUDA time total: 2.537s
+

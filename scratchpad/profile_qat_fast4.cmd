@@ -1,10 +1,10 @@
 @echo off
 REM QAT speed A/B round 4: all four flags + RWKV_QAT_COMPILE=student (round 3 showed compiling the
 REM no_grad teacher REGRESSES it 166->343 ms/step while the student wins fwd+bwd). Queued behind the
-REM q72d GPU eval (next GPU-idle window). Compare profile_qat_out_fast4.txt vs _fast3/_fast2.
+REM q72w verdict chain (the next truly-free GPU window; retargeted 2026-07-07 after the restart killed the original waiter). Compare profile_qat_out_fast4.txt vs _fast3/_fast2.
 cd /d C:\Users\Andrew\rwkv-state-quant\gpu_train
 for /L %%i in (1,1,2400) do (
-  findstr /C:"DONE_EXIT" "C:\Users\Andrew\rwkv-state-quant\scratchpad\gpu_eval_q72d.log" >nul 2>&1 && goto :run
+  findstr /C:"DONE_EXIT" "C:\Users\Andrew\rwkv-state-quant\scratchpad\pq_q72w.log" >nul 2>&1 && goto :run
   timeout /t 30 /nobreak >nul
 )
 :run
