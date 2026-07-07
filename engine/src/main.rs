@@ -800,6 +800,8 @@ fn batched_to_fast(
                         t_state: ls.t_state.flatten_all()?.to_vec1()?,
                         c_xshift: ls.c_xshift.flatten_all()?.to_vec1()?,
                         e_state: Vec::new(),
+                        warm_wkv: Vec::new(),
+                        warm_shift: Vec::new(),
                     });
                 }
                 out.push(Some(fs));
@@ -856,6 +858,8 @@ fn bench_synth_fast(model: &Model, secs: f64, b: usize) -> Result<()> {
                 t_state: rv((b, h, k, k))?,
                 c_xshift: rv((b, c, 1, 1))?,
                 e_state: Vec::new(),
+                warm_wkv: Vec::new(),
+                warm_shift: Vec::new(),
             });
         }
         states.push(Some(st));

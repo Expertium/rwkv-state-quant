@@ -27,6 +27,11 @@ pub struct FastLayerState {
     pub t_state: Vec<f32>,  // B*H*K*K
     pub c_xshift: Vec<f32>, // B*C
     pub e_state: Vec<f32>,  // B*H*K*K error-feedback buffer (Idea EF); empty when EF off
+    /// task25 warm-start indices (previous winning centroids for THIS entity; travel with the state
+    /// through the per-entity HashMaps). Speed-only — the search results are provably pick-identical,
+    /// so these change NO predictions. Empty when the respective PQ path is off.
+    pub warm_wkv: Vec<i32>,   // B*H*2 joint-WKV picks ([bi][head][rank_comp]); -1 = none
+    pub warm_shift: Vec<i32>, // B*2*m shift-PQ picks ([bi][role][pos]); -1 = none
 }
 pub type FastStreamState = Vec<FastLayerState>;
 
@@ -361,9 +366,9 @@ impl FastModel {
             // current step's output (xt) was already computed from the pre-compression state, so this
             // only affects what the NEXT step reads back.
             let e_prev = ls.map(|s| s.e_state.as_slice());
-            let e_state =
-                self.compress_stream_state(m, b, &mut t_state, &mut t_xshift, &mut c_xshift, e_prev);
-            new_state.push(FastLayerState { t_xshift, t_state, c_xshift, e_state });
+            let (e_state, warm_wkv, warm_shift) =
+                self.compress_stream_state(m, b, &mut t_state, &mut t_xshift, &mut c_xshift, e_prev, ls);
+            new_state.push(FastLayerState { t_xshift, t_state, c_xshift, e_state, warm_wkv, warm_shift });
         }
         Ok((x, new_state))
     }
@@ -430,7 +435,8 @@ impl FastModel {
     /// Per-step state compression for stream `m`, in place on the persisted (B,H,K,K)/(B,C) buffers.
     /// Mirrors the candle `forward_stream`: low-rank (card/note) takes precedence over full-matrix quant;
     /// shift vectors quantized at the stream's bit-width when `quant_shifts`. Per card (b).
-    /// Returns the new error-feedback buffer (B*H*K*K) for the WKV state when EF is on; empty otherwise.
+    /// Returns (new error-feedback buffer for the WKV state when EF is on, new warm_wkv, new warm_shift)
+    /// — the warm vecs carry this entity's previous winning centroid indices (task25, speed-only).
     #[allow(clippy::too_many_arguments)]
     fn compress_stream_state(
         &self,
@@ -440,11 +446,31 @@ impl FastModel {
         t_xshift: &mut [f32],
         c_xshift: &mut [f32],
         e_prev: Option<&[f32]>,
-    ) -> Vec<f32> {
+        ls: Option<&FastLayerState>,
+    ) -> (Vec<f32>, Vec<i32>, Vec<i32>) {
         let (c, h, k) = (self.c, self.h, self.k);
         let hkk = h * k * k;
         let cfg = &self.compress;
         let mut e_new: Vec<f32> = Vec::new();
+        // Warm-index buffers: seed from the entity's previous step (size-checked — a mismatch, e.g. a
+        // state saved before this feature, just falls back to cold -1s). Only allocated for live paths.
+        let want_wkv = if cfg.pq.as_deref().map(|p| p.joint).unwrap_or(false)
+            && cfg.lowrank.contains_key(&m)
+        {
+            b * h * 2
+        } else {
+            0
+        };
+        let mut warm_wkv: Vec<i32> = ls
+            .map(|s| s.warm_wkv.clone())
+            .filter(|v| v.len() == want_wkv)
+            .unwrap_or_else(|| vec![-1; want_wkv]);
+        let shift_m = cfg.shift_pq.as_deref().map(|p| p.m).unwrap_or(0);
+        let want_shift = if cfg.quant_shifts { b * 2 * shift_m } else { 0 };
+        let mut warm_shift: Vec<i32> = ls
+            .map(|s| s.warm_shift.clone())
+            .filter(|v| v.len() == want_shift)
+            .unwrap_or_else(|| vec![-1; want_shift]);
         if let Some(&(rank, fqmax)) = cfg.lowrank.get(&m) {
             if cfg.ef {
                 // Idea EF: add the carried quant error back to the fresh state, re-compress, then store the
@@ -462,9 +488,12 @@ impl FastModel {
                     }
                     // snapshot the compensated state A' before compress overwrites it with Â
                     let comp: Vec<f32> = slice.to_vec();
+                    // EF path stays COLD (warm None): it compresses two different matrices per step
+                    // (compensated state + error), which would fight over one warm slot. EF is off in
+                    // the production recipe.
                     crate::model::compress_wkv_state(
                         slice, h, k, rank, fqmax, cfg.percol, cfg.hadamard, cfg.four_level,
-                        cfg.mixed53, cfg.compand, cfg.vqmax, cfg.als, cfg.pq.as_deref(),
+                        cfg.mixed53, cfg.compand, cfg.vqmax, cfg.als, cfg.pq.as_deref(), None,
                     );
                     let eb = &mut e_new[bi * hkk..(bi + 1) * hkk];
                     for j in 0..hkk {
@@ -479,16 +508,18 @@ impl FastModel {
                         let epq = if cfg.ef_pq { cfg.pq.as_deref() } else { None };
                         crate::model::compress_wkv_state(
                             eb, h, k, er, cfg.ef_elevel, cfg.percol, false, false, false, None, None,
-                            None, epq,
+                            None, epq, None,
                         );
                     }
                 }
             } else {
                 for bi in 0..b {
+                    let wslice = (!warm_wkv.is_empty())
+                        .then(|| &mut warm_wkv[bi * h * 2..(bi + 1) * h * 2]);
                     crate::model::compress_wkv_state(
                         &mut t_state[bi * hkk..(bi + 1) * hkk], h, k, rank, fqmax, cfg.percol,
                         cfg.hadamard, cfg.four_level, cfg.mixed53, cfg.compand, cfg.vqmax, cfg.als,
-                        cfg.pq.as_deref(),
+                        cfg.pq.as_deref(), wslice,
                     );
                 }
             }
@@ -510,13 +541,18 @@ impl FastModel {
                 for bi in 0..b {
                     for (role, xs) in [(0usize, &mut t_xshift[..]), (1, &mut c_xshift[..])] {
                         let sl = &mut xs[bi * c..(bi + 1) * c];
+                        // warm slots for this (entity, role): the rotation is fixed at eval, so the
+                        // rotated vector drifts as slowly as the raw one — warm applies either way
+                        let ws = (!warm_shift.is_empty()).then(|| {
+                            &mut warm_shift[(bi * 2 + role) * shift_m..(bi * 2 + role + 1) * shift_m]
+                        });
                         if let Some(rot) = &cfg.shift_rot {
                             let rb = &rot[role * c * c..(role + 1) * c * c];
                             crate::model::rot_apply(rb, sl, false);
-                            pq.encode_decode(role, sl);
+                            pq.encode_decode_warm(role, sl, ws);
                             crate::model::rot_apply(rb, sl, true);
                         } else {
-                            pq.encode_decode(role, sl);
+                            pq.encode_decode_warm(role, sl, ws);
                         }
                     }
                 }
@@ -532,7 +568,7 @@ impl FastModel {
                 }
             }
         }
-        e_new
+        (e_new, warm_wkv, warm_shift)
     }
 
     /// forgetting_curve(out_w, elapsed) -> probability. out_w is (num_curves). Mirrors model.rs.

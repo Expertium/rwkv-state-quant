@@ -299,6 +299,7 @@ fn lowrank_roundtrip(
     compress_wkv_state(
         &mut data, h, k, rank, factor_qmax, per_col, hadamard, four_level, mixed53, compand, v_qmax,
         als_iters, None, // PQ is fast-path only (like EF); candle stays for parity A/B of the non-PQ paths
+        None, // no PQ -> no warm indices
     );
     Ok(Tensor::from_vec(data, (h, k, k), t.device())?)
 }
@@ -325,6 +326,11 @@ pub struct PqCodebook {
     /// entries; ONE index per head selects BOTH factor directions (u/v correlation captured), each
     /// half rescaled by its own (norm-quantized) norm. File = 1 centroid block instead of 4.
     pub joint: bool,
+    /// task25 (port of the CUDA warm-start, RWKV_QAT_NO_WARM analog): callers that compress the SAME
+    /// entity's state/shift on consecutive reviews can pass the previous winning index as a warm bound —
+    /// the vectors drift slowly, so most of the catalog prunes after a few dims. PROVABLY pick-identical
+    /// (see the scan comments). `RWKV_NO_WARM=1` disables it (bitwise-A/B / paranoid fallback).
+    pub warm_enabled: bool,
 }
 
 impl PqCodebook {
@@ -358,7 +364,8 @@ impl PqCodebook {
             anyhow::ensure!(flat.len() == ncent * sub_dim, "PQ centroid block size mismatch");
             cb.push(flat);
         }
-        Ok(Self { m, sub_dim, k, ncent, cb, norm_bits: None, norm_lo_log2: 0.0, norm_hi_log2: 0.0, joint })
+        let warm_enabled = std::env::var("RWKV_NO_WARM").map(|v| v != "1").unwrap_or(true);
+        Ok(Self { m, sub_dim, k, ncent, cb, norm_bits: None, norm_lo_log2: 0.0, norm_hi_log2: 0.0, joint, warm_enabled })
     }
 
     /// Enable norm quantization (see field docs). Called by Model::load per codebook with its range.
@@ -391,6 +398,17 @@ impl PqCodebook {
     /// by the original norm. `role` selects the codebook set (0=u1,1=v1,2=u2,3=v2).
     #[inline]
     pub(crate) fn encode_decode(&self, role: usize, col: &mut [f32]) {
+        self.encode_decode_warm(role, col, None);
+    }
+
+    /// `encode_decode` with a warm-start bound (task25, port of the CUDA kernel's warm-started scan).
+    /// `warm` (len >= m): per-chunk previous winning index for THIS entity+role, or -1; updated in place.
+    /// PROVABLY PICK-IDENTICAL to the plain scan: (a) the serial first-strict-min == argmin by
+    /// (distance, then lower index), and the scan below keeps exactly that order via the explicit tie
+    /// rule; (b) d is a monotone non-decreasing sum of squares, so a candidate whose partial sum already
+    /// fails the update predicate can never win — pruning it is safe; (c) rustc emits strict-IEEE f32
+    /// (no reassociation/contraction), so distances are bit-equal to the plain scan's.
+    pub(crate) fn encode_decode_warm(&self, role: usize, col: &mut [f32], mut warm: Option<&mut [i32]>) {
         let mut norm = col.iter().map(|x| x * x).sum::<f32>().sqrt();
         if !norm.is_finite() || norm < 1e-20 {
             return;
@@ -400,19 +418,37 @@ impl PqCodebook {
         for p in 0..self.m {
             let s = p * self.sub_dim;
             let cents = &self.cb[role * self.m + p];
-            let mut best = 0usize;
+            let wc: Option<usize> = match (self.warm_enabled, warm.as_deref()) {
+                (true, Some(w)) => (w[p] >= 0 && (w[p] as usize) < self.ncent).then(|| w[p] as usize),
+                _ => None,
+            };
+            let mut best = 0usize; // centroid-0 fallback if every distance is non-finite (as before)
             let mut bestd = f32::INFINITY;
-            for c in 0..self.ncent {
+            // warm candidate first (exact bound), then the rest; one loop body = one FP op sequence
+            for c in wc.into_iter().chain((0..self.ncent).filter(|&cc| Some(cc) != wc)) {
                 let base = c * self.sub_dim;
                 let mut d = 0f32;
-                for j in 0..self.sub_dim {
-                    let diff = col[s + j] * inv - cents[base + j];
-                    d += diff * diff;
+                let mut alive = true;
+                let mut j = 0usize;
+                while j < self.sub_dim {
+                    let je = (j + 8).min(self.sub_dim);
+                    while j < je {
+                        let diff = col[s + j] * inv - cents[base + j];
+                        d += diff * diff;
+                        j += 1;
+                    }
+                    alive = d < bestd || (d == bestd && c < best); // survival == update predicate
+                    if !alive {
+                        break;
+                    }
                 }
-                if d < bestd {
+                if alive {
                     bestd = d;
                     best = c;
                 }
+            }
+            if let Some(w) = warm.as_deref_mut() {
+                w[p] = best as i32;
             }
             let base = best * self.sub_dim;
             for j in 0..self.sub_dim {
@@ -427,6 +463,13 @@ impl PqCodebook {
     /// factor leaves BOTH untouched (the pair is one code — half a code is meaningless).
     #[inline]
     pub(crate) fn encode_decode_joint(&self, u: &mut [f32], v: &mut [f32]) {
+        self.encode_decode_joint_warm(u, v, None);
+    }
+
+    /// `encode_decode_joint` with a warm-start bound (task25). `warm` = the previous winning index for
+    /// THIS (entity, head, rank-component), or -1; updated in place. Pick-identity proof: see
+    /// `encode_decode_warm` — same three-part argument, u-half then v-half accumulation order unchanged.
+    pub(crate) fn encode_decode_joint_warm(&self, u: &mut [f32], v: &mut [f32], warm: Option<&mut i32>) {
         let k = u.len();
         let nu = u.iter().map(|x| x * x).sum::<f32>().sqrt();
         let nv = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -436,23 +479,46 @@ impl PqCodebook {
         let (iu, iv) = (1.0 / nu, 1.0 / nv);
         let (qu, qv) = (self.quant_norm(nu), self.quant_norm(nv));
         let cents = &self.cb[0];
-        let mut best = 0usize;
+        let wc: Option<usize> = match (self.warm_enabled, warm.as_deref()) {
+            (true, Some(&w)) => (w >= 0 && (w as usize) < self.ncent).then_some(w as usize),
+            _ => None,
+        };
+        let mut best = 0usize; // centroid-0 fallback if every distance is non-finite (as before)
         let mut bestd = f32::INFINITY;
-        for c in 0..self.ncent {
+        for c in wc.into_iter().chain((0..self.ncent).filter(|&cc| Some(cc) != wc)) {
             let base = c * self.sub_dim;
             let mut d = 0f32;
-            for j in 0..k {
-                let diff = u[j] * iu - cents[base + j];
-                d += diff * diff;
+            let mut alive = true;
+            let mut j = 0usize;
+            while j < k {
+                let je = (j + 8).min(k);
+                while j < je {
+                    let diff = u[j] * iu - cents[base + j];
+                    d += diff * diff;
+                    j += 1;
+                }
+                alive = d < bestd || (d == bestd && c < best);
+                if !alive {
+                    break;
+                }
             }
-            for j in 0..k {
-                let diff = v[j] * iv - cents[base + k + j];
-                d += diff * diff;
+            let mut j = 0usize;
+            while alive && j < k {
+                let je = (j + 8).min(k);
+                while j < je {
+                    let diff = v[j] * iv - cents[base + k + j];
+                    d += diff * diff;
+                    j += 1;
+                }
+                alive = d < bestd || (d == bestd && c < best);
             }
-            if d < bestd {
+            if alive {
                 bestd = d;
                 best = c;
             }
+        }
+        if let Some(w) = warm {
+            *w = best as i32;
         }
         let base = best * self.sub_dim;
         for j in 0..k {
@@ -481,6 +547,9 @@ pub fn compress_wkv_state(
     v_qmax: Option<f64>,
     als_iters: Option<usize>,
     pq: Option<&PqCodebook>,
+    // task25: joint-path warm indices for THIS entity, layout [head*2 + rank_component], -1 = none
+    // (len >= h*2 when Some). Only the joint PQ path uses it; everything else ignores it.
+    mut warm: Option<&mut [i32]>,
 ) {
     use nalgebra::DMatrix;
     let r = rank.min(k);
@@ -591,7 +660,8 @@ pub fn compress_wkv_state(
                 }
                 if pq.joint {
                     // joint-uv catalog: ONE code per (head, rank-component) selects both directions
-                    pq.encode_decode_joint(&mut us[o..o + k], &mut vs[o..o + k]);
+                    let wref = warm.as_deref_mut().map(|w| &mut w[hh * 2 + j]);
+                    pq.encode_decode_joint_warm(&mut us[o..o + k], &mut vs[o..o + k], wref);
                 } else {
                     pq.encode_decode(2 * j, &mut us[o..o + k]);
                     pq.encode_decode(2 * j + 1, &mut vs[o..o + k]);
