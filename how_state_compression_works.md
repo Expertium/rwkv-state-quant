@@ -1,5 +1,5 @@
-# How the WKV state gets squeezed from 2.25 KB to 64 bits
-### The nine levels of compression used in this project, explained from scratch
+# How the WKV state gets squeezed from 2.25 KB to 9 bytes
+### The eleven levels of compression used in this project, explained from scratch
 
 This note explains, from the ground up, how this project compresses an RWKV-7 recurrent "WKV state"
 for storage. It assumes **no linear algebra and no quantization background** — every concept is built
@@ -16,15 +16,16 @@ The network keeps a little memory matrix for **every flashcard** (and every note
 one layer, that memory is **two 16×16 matrices** (one per "head") of 32-bit floats, plus two 32-number
 "token-shift" vectors (explained in their own section below). Raw size, counted exactly:
 `(2×16×16 + 2×32) × 32 bits = 18,432 bits = 2.25 KB` per card. A power user has ~1,000,000 cards, so
-raw states are gigabytes. The comfortable champion stores each card in **72 bits — nine bytes, a 256×
-reduction** — at a log-loss degradation of **+0.0018 / +0.0016** (immediate-recall head /
-forgetting-curve head), well inside the project's ≤ +0.0025 acceptance gate; pushing to the very
-boundary of that gate, **64 bits — one 8-byte machine word per card, 288×** — also passes, with a
-razor-thin margin (+0.002492 / +0.0012). An earlier milestone on the
-way, the 352-bit card, is even *cheaper* than free on one head: **+0.0010 / −0.0003** (yes, negative —
-that compressed model predicts marginally *better* than the uncompressed one on the forgetting-curve
-head; the QAT section explains how that is possible). The rest of this note climbs the nine levels
-that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take the same card down to 64 bits.
+raw states are gigabytes. The final, locked-in scheme stores each card in **72 bits — nine bytes, a
+256× reduction** — at a log-loss degradation of **+0.0011 / +0.0002** (immediate-recall head /
+forgetting-curve head), under half the project's ≤ +0.0025 acceptance gate on one head and a tenth
+of it on the other, and *reproduced at a second training seed* (+0.0011 / +0.0004 — the postscript
+explains why that test exists). An earlier
+milestone on the way, the 352-bit card, is even *cheaper* than free on one head: **+0.0010 / −0.0003**
+(yes, negative — that compressed model predicts marginally *better* than the uncompressed one on the
+forgetting-curve head; the QAT section explains how that is possible). The rest of this note climbs
+the eleven levels that get there: Levels 1–5 build the 352-bit card, Levels 6–9 take it below 100
+bits, and Levels 10–11 — two ideas about *what a catalog even is* — produce the final 72-bit card.
 
 What is that "memory matrix", concretely? Just a **grid of numbers** — 16 rows × 16 columns, 256
 ordinary decimal numbers like `0.31` and `-0.007` — that the network reads and updates every time you
@@ -433,7 +434,7 @@ is flipped (before encoding) to a standard orientation: whichever sign makes `u`
 entry positive. All directions land in the same "hemisphere", no catalog entries get wasted on
 mirror images of each other — effectively doubling the catalog's resolution for free.
 
-### 5e. The 352-bit card, counted exactly (the first PQ champion — Levels 6–9 shrink it further)
+### 5e. The 352-bit card, counted exactly (the first PQ champion — Levels 6–11 shrink it further)
 
 | piece | how | bits |
 |---|---|---|
@@ -469,9 +470,10 @@ the single most surprising fact of the second descent:
 Measured along the way (all with the shifts and training recipe held fixed): 256-entry catalogs at
 352 b gave +0.0010/−0.0003; **64-entry** catalogs (6-bit indices, 272 b) gave +0.0011/−0.0003 — a
 statistical tie with *the best robustness profile of any scheme tested*; **16-entry** catalogs (4-bit
-indices) carried the 256-, 192- and 144-bit rungs; **8-entry** catalogs (3-bit indices) hold the
-current 80-bit champion. Each halving of the index width moved the needle by roughly +0.0000 to
-+0.0004.
+indices) carried the 256-, 192- and 144-bit rungs; **8-entry** catalogs (3-bit indices) carried the
+80- and 88-bit rungs. Each halving of the index width moved the needle by roughly +0.0000 to
++0.0004. (The *final* WKV coding, Level 11, swings back the other way — a much bigger catalog at the
+same index width — but it needed Level 10's insight first.)
 
 Why doesn't an 8-swatch palette hurt? Because QAT changes what the palette has to cover. With a
 *fixed* network, the catalog must approximate whatever directions the states happen to visit — more
@@ -501,7 +503,7 @@ advance of the measurement): *PQ won over integer grids for the WKV directions, 
 happen for the shifts.* Confirmed, decisively:
 
 - **PQ shifts at 80 bits beat int2 shifts at 128 bits** — fewer bits *and* better log-loss.
-- The deployed recipe: normalize each 32-value shift vector, chop into **m = 4 chunks of 8**, one
+- The recipe at this rung: normalize each 32-value shift vector, chop into **m = 4 chunks of 8**, one
   catalog per chunk position per role (the time-mix shift and the channel-mix shift get separate
   catalogs — their distributions differ), store 4 indices + the norm. With 64-entry catalogs
   ("m4b6"), a shift vector costs 4 × 6 = 24 bits of indices; both vectors together **48 bits** —
@@ -519,23 +521,27 @@ of indices + the norm 5.8 (whose own fate is Level 9's story). Decoding: look up
 concatenate into a 32-number unit vector, multiply by 5.8. Both shift vectors together: **48 bits**
 of indices — where the 352-bit era spent 256.
 
-**Where the new wall is — and the trick that finally bent it.** Halving the shift catalogs once
-more (32 entries, "m4b5", 40 bits) fails the gate: +0.0027/+0.0017 — and, crucially, it fails
-*identically* (+0.0027/+0.0018) even with every learnable lever of Level 8 engaged. That is the
-signature of a **capacity wall**, not an optimization gap: 32 swatches per chunk cannot cover the
-shift manifold, and no amount of catalog training moves it.
+**Where the new wall is.** Halving the shift catalogs once more (32 entries, "m4b5", 40 bits) fails
+the gate: +0.0027/+0.0017 — and, crucially, it fails *identically* (+0.0027/+0.0018) even with every
+learnable lever of Level 8 engaged. That is the signature of a **capacity wall**, not an
+optimization gap: 32 swatches per chunk cannot cover the shift manifold, and no amount of catalog
+training moves it.
 
-What finally bent it is the one thing chunked catalogs are structurally blind to. Chopping a vector
-into 4 independent chunks assumes the chunks don't coordinate — but real shift vectors have
-correlations *across* the chunk boundaries, and no amount of per-chunk catalog quality can encode
-those. The fix: **learn a rotation** (an orthogonal remix of the 32 coordinates — think of it as
-re-axising the space; lengths and distances are perfectly preserved) that is applied *before* the
-chop and undone after decoding. The rotation is trained jointly with everything else (initialized
-to "do nothing", it drifts to wherever the loss wants), ships as one global 32×32 matrix per role —
-amortized like the catalogs, zero per-card bits — and moves the cross-chunk structure to where the
-chunked catalogs can see it. Result: the 32-entry wall that stood at +0.0027 twice fell to
-**+0.002492** — under the gate by a whisker — buying the final 8 bits of the 64-bit card. (This is
-the "SpinQuant/QuaRot" idea from the LLM-quantization literature, adapted to product quantization.)
+**A detour that looked like the answer (and wasn't): learned rotations.** Chopping a vector into 4
+independent chunks assumes the chunks don't coordinate — but real shift vectors have correlations
+*across* the chunk boundaries that no per-chunk catalog can encode. One published fix (the
+"SpinQuant/QuaRot" idea from the LLM-quantization literature): **learn a rotation** — an orthogonal
+remix of the 32 coordinates, applied before the chop and undone after decoding, zero per-card bits —
+that moves the cross-chunk structure to where the chunked catalogs can see it. It did once carry a
+64-bit card over the gate by a margin of +0.000008… and that win **failed to reproduce**: rerunning
+the identical recipe with only the training seed changed landed at +0.0026/+0.0030, both over the
+gate (the postscript at the end tells this story properly). The rotation lever was later closed for
+good, from both ends: for *unchopped* (single-chunk) catalogs it is **provably redundant** — rotating
+every input before matching against a catalog is exactly the same as matching the unrotated input
+against a counter-rotated catalog, and a *learnable* catalog (Level 8) can already become that
+counter-rotated catalog on its own; and on the final chunked shift coding it was measured to
+*hurt* (+0.0019/+0.0012 vs +0.0013/+0.0002 without it). What actually broke the shift wall is
+Level 10 — no new math, just a realization about what the bits pay for.
 
 ---
 
@@ -629,29 +635,112 @@ too (same theme as everything above — train ≈ deploy, exactly). As pure post
 the int4 norm snap cost +0.0005 imm — enough to fail the 88-bit rung by a hair; with the snap in the
 training forward, the cost fell to ~+0.0002 and the rung passed.
 
-### The 72-bit card, counted exactly
+### A first 72-bit card: stop chopping what doesn't need chopping
 
-One last twist first. All the rungs above chop each 16-entry WKV direction into 2 chunks with
-separate catalogs (the "product" trick of Level 5b). That trick exists because a whole-vector
-catalog would need to be enormous — for a *big* vector. But 16 dimensions with 32 entries is not
-enormous, and a single **joint** catalog over the whole direction can capture patterns *between*
-the halves that two independent chunk catalogs cannot (the halves of real directions are
-correlated; the product form is blind to that). Measured: one 32-entry joint catalog (5 bits per
-direction) beats the two 8-entry chunk catalogs (6 bits per direction) on BOTH quality and size —
-+0.0018 vs +0.0023 imm. Chunking is a compromise for high dimensions, and at 16 dimensions it
-turns out we didn't need the compromise.
+The rungs above chop each 16-entry WKV direction into 2 chunks with separate catalogs (the
+"product" trick of Level 5b). That trick exists because a whole-vector catalog would need to be
+enormous — for a *big* vector. But 16 dimensions with 32 entries is not enormous, and a single
+**whole-direction catalog** can capture patterns *between* the halves that two independent chunk
+catalogs cannot (the halves of real directions are correlated; the product form is blind to that).
+Measured: one 32-entry whole-direction catalog (5 bits per direction) beats two 8-entry chunk
+catalogs (6 bits per direction) on BOTH quality and size — +0.0018 vs +0.0023 imm. Chunking is a
+compromise for high dimensions, and at 16 dimensions we didn't need the compromise. That insight
+produced a first 72-bit card (whole-direction WKV catalogs + Level 7's 64-entry shift catalogs +
+1-bit norms) at **+0.0018/+0.0016** — a solid pass, and the two levels below then rebuilt both of
+its halves and cut the degradation nearly in half *at the same 72 bits*.
+
+---
+
+## Level 10 — Index bits ≠ catalog size: pay for the pointer, not the palette
+
+Look carefully at what the per-card budget actually pays for: the **index** — the number that says
+which catalog entry to use. The catalog itself is global, shipped once inside the app, amortized
+over every card of every user (Level 5d). So the per-card cost of a chunk is `log₂(entries)` bits,
+and *nothing else about the catalog's size matters to the card*.
+
+That has a consequence the whole descent had been ignoring. At a fixed per-vector index budget,
+you can trade **number of chunks** against **entries per catalog** freely:
+
+```
+m4b6:  4 chunks × 6-bit index  =  24 bits,  4 catalogs ×   64 entries of  8 dims
+m2b12: 2 chunks × 12-bit index =  24 bits,  2 catalogs × 4096 entries of 16 dims
+                                  ↑ same 24 per-card bits — 64× more swatches per chunk
+```
+
+The second row covers each 16-dim half with 4,096 swatches instead of covering each 8-dim quarter
+with 64 — vastly more capacity, longer chunks (so more cross-coordinate structure captured per
+catalog, the same effect as the whole-direction insight above), and the card pays **exactly the
+same 24 bits**. The price is paid elsewhere, where it's cheap: the shift catalogs grow to
+2 roles × 2 positions × 4096 × 16 = 262,144 floats (1 MB as f32) shipped once in the app, and the
+encoder has 4,096 entries to search per chunk instead of 64 (microseconds; and a warm-start trick —
+"the state barely moved since the last review, so start from last time's pick" — prunes most of
+that search with provably identical results).
+
+This is what actually broke Level 7's shift wall. The m4b5 32-entry wall stood at +0.0027 through
+every training lever; **m2b12 at the identical 48 shift bits** dropped the 72-bit card from
++0.0018/+0.0016 to **+0.0013/+0.0002** — and with the best per-user robustness of any sub-100-bit
+scheme measured to that point. (The catalogs are k-means-initialized on a corpus of real shift
+vectors, then gradient-co-trained per Level 8 — a 4,096-entry catalog is *harder* to init well by
+k-means alone, so the learnable lever matters more here.)
+
+---
+
+## Level 11 — Joint-uv: one code picks both directions
+
+The same "what are the bits actually paying for?" question, turned on the WKV side, finds one last
+redundancy. Each head stores TWO directions — the `u` factor and the `v` factor of its rank-1
+piece. The first 72-bit card coded them independently: 5 bits for `u` against a 32-entry catalog,
+5 bits for `v` against another. Independent coding can represent any of `32 × 32 = 1,024`
+(u-pattern, v-pattern) combinations… but `u` and `v` are **not independent** — they factor the
+*same* matrix, produced by the *same* card's history, and in the corpus they co-occur in strongly
+correlated pairs. Most of those 1,024 cross-combinations never happen.
+
+So spend the same 10 bits differently: build ONE catalog of **1,024 entries, each a full
+(u-direction, v-direction) PAIR** — a 32-number pattern, the two 16-dim directions glued together —
+and store a single 10-bit code per head that picks both at once. The index space is identical
+(2⁵ × 2⁵ = 2¹⁰ combinations vs 2¹⁰ entries); the difference is that all 1,024 entries are now
+*pairs that actually occur*, with the catalog's full resolution concentrated on the real joint
+distribution instead of spread over a mostly-empty product grid. Encoding: normalize `u` and `v`
+separately, glue them, find the nearest 32-number entry (ordinary Level 5c distance, just in 32
+dims); decoding: split the winning entry back into halves and rescale each by its stored norm.
+
+Measured, at bit-identical 72 bits: **+0.0011/+0.0002** vs independent coding's +0.0013/+0.0002 —
+and two properties beyond the mean made this the scheme that got locked in:
+- **Robustness**: the fewest hurt users of any sub-100-bit rung ever measured (96–98 of 400 users
+  above-noise worse on the immediate head, vs ~108 for the product form and ~173 for the old
+  64-bit attempt).
+- **Stability**: retraining the whole QAT run with a different random seed moved the immediate-head
+  result by **+0.000008** — essentially nothing — where earlier schemes swung by ±0.0004. Coding
+  `u` and `v` jointly appears to stabilize exactly the head deployment cares most about.
+
+### The locked 72-bit card, counted exactly (the final recipe)
 
 | piece | how | bits |
 |---|---|---|
-| 4 WKV direction indices | one 32-entry JOINT catalog per role | 4 × 5 = **20** |
+| 2 WKV joint-uv codes (one per head) | Level 11: 1,024-entry pair catalog | 2 × 10 = **20** |
 | 2 WKV norms (deduped, 9a) | Level 9: 1-bit log₂ band | 2 × 1 = **2** |
-| 2 token-shift vectors | Level 7: 64-entry catalogs, 4 chunks × 6 b | 2 × 24 = **48** |
+| 2 token-shift vectors | Level 10: 4,096-entry catalogs, 2 chunks × 12 b | 2 × 24 = **48** |
 | 2 shift norms | Level 9: 1-bit log₂ band | 2 × 1 = **2** |
 | **card total** | | **20 + 2 + 48 + 2 = 72** |
 
 **Nine bytes per card**; a note (3 layers) = 216 bits = 27 bytes. Against the 18,432-bit raw
-state: **256×**. Log-loss degradation +0.0018/+0.0016 — measured on the deployed Rust engine over
-400 held-out users, with the best per-user robustness profile since the 144-bit rung.
+state: **256×**. Log-loss degradation **+0.0011/+0.0002**, reproduced at a second training seed
+(+0.0011/+0.0004), measured on the deployed Rust engine over 400 held-out users. The shipped-once
+global catalogs: the WKV pair catalog (1,024 × 32 = 32,768 floats, 128 KB as f32) + the shift
+catalogs (1 MB as f32) — ≈1.1 MB total, amortized over every card and note of every user.
+
+### Postscript — the 64-bit rung, seed noise, and why 72 is where it stopped
+
+One rung below 72 was reached, once: a 64-bit card (one 8-byte machine word) that passed the gate
+at +0.002492 — a margin of +0.000008. Then a discipline check: rerun the *identical* recipe
+changing only the training's random seed. It landed at +0.0026/+0.0030 — both heads over the gate.
+Two more same-family runs confirmed the picture: the recipe's true mean sits at or above the gate,
+and the one "pass" was the lucky tail of run-to-run noise. The measured seed-to-seed swing (up to
+~±0.0005 immediate, ~±0.0018 forgetting-curve) became a standing rule: **any pass with a margin
+thinner than the seed noise is unresolved until an exact-recipe rerun at a second seed confirms
+it.** The 56-bit and 52-bit attempts died the same way or worse. The locked 72-bit champion was
+held to that same standard — its two seeds agree to +0.000008 on the immediate head — and 72 bits
+was declared the floor: the remaining value is quality at 72 bits, not fewer bits.
 
 ---
 
@@ -755,14 +844,15 @@ turned the 88-bit near-miss (+0.0026) into a pass (+0.0023).
   sign-canonicalize  (flip pair so uf's dominant entry > 0)              (Level 5d)
         │
         ▼
-  PQ-encode each direction: chop in 2 → nearest centroid in each        (Level 5b)
-  catalog → store (index, index) + norm                                  16 b + norm per direction
+  joint-uv encode: normalize u and v, glue into one 32-number           (Level 11)
+  pattern, nearest of 1,024 pair-entries → store ONE 10-bit code         10 b + norm per head
+  + the (deduped, 1-bit) norm
         │
         ▼
   reconstruct  Â = uf·vfᵀ  →  feed back into the recurrence              (every step!)
 
-  …and separately: token-shift vectors → normalize, PQ-encode against    (Level 7, 48 b + norms)
-  the learned shift catalogs (4 chunks × 6-bit index per vector)
+  …and separately: token-shift vectors → normalize, PQ-encode against    (Levels 7+10, 48 b + norms)
+  the learned shift catalogs (2 chunks × 12-bit index per vector)
 ```
 
 The bit ladder, selected rungs (all measured on 400 held-out users; gate = ≤ +0.0025 on both heads):
@@ -778,17 +868,20 @@ The bit ladder, selected rungs (all measured on 400 held-out users; gate = ≤ +
 | Level 8: + learnable shift catalog | 144 | +0.0013 / −0.0001 |
 | Levels 6+7+8+9 combined (8-entry WKV catalogs, modeled norms) | 88 | +0.0023 / +0.0006 |
 | Level 9 endgame: 1-bit norms | 76 | +0.0023 / +0.0005 |
-| **Joint WKV catalog (comfortable champion)** | **72** | **+0.0018 / +0.0016** |
-| Learned rotation + 32-entry shift catalogs (boundary) | 64 | +0.002492 / +0.0012 |
+| Whole-direction WKV catalogs (first 72-bit card) | 72 | +0.0018 / +0.0016 |
+| Level 10: big-catalog shifts (m2b12) | 72 | +0.0013 / +0.0002 |
+| **Level 11: joint-uv WKV coding — THE LOCKED CHAMPION** | **72** | **+0.0011 / +0.0002** (seed 2: +0.0011 / +0.0004) |
+| Learned rotation + 32-entry shift catalogs | 64 | +0.002492 / +0.0012 — **did NOT reproduce; retired** |
 
-Every rung above passes the gate — though the 64-bit rung only just: its margin is +0.000008 on
-the immediate head and its per-user profile is the tightest of the ladder (power users average
-slightly over the gate), which is why 72 bits is called the *comfortable* champion. Three instructive failures bracket the frontier: 32-entry shift
-catalogs (80 b via the shift route) fail at +0.0027 *even with everything learnable* — a capacity
-wall; the 96-bit attempt via 16-entry shift catalogs failed the same way; and **0-bit (fixed) norms
-fail decisively at +0.0064** — the norm axis bottoms out at one bit. The descent below 88 b happened
-entirely on the norm axis, and every rung of it was pure post-training quantization: no retraining,
-just deploying the 88-bit QAT weights with coarser and coarser norms.
+Every 72-bit-and-above rung passes the gate. The 64-bit rung is listed for honesty: its one pass
+had a +0.000008 margin and failed an exact-recipe rerun at a second training seed (the postscript).
+Three instructive failures bracket the frontier: 32-entry shift catalogs (80 b via the shift route)
+fail at +0.0027 *even with everything learnable* — a capacity wall (later dissolved by Level 10's
+bigger-catalog route rather than climbed); the 96-bit attempt via 16-entry shift catalogs failed
+the same way; and **0-bit (fixed) norms fail decisively at +0.0064** — the norm axis bottoms out at
+one bit. The descent 88 → 76 happened entirely on the norm axis as pure post-training quantization;
+the final 76 → 72-at-champion-quality step came from Levels 10–11 rebuilding both catalog schemes
+at fixed bits.
 
 ---
 
@@ -825,7 +918,18 @@ just deploying the 88-bit QAT weights with coarser and coarser norms.
 - **Coarse catalogs under QAT (Level 6)** — shrinking WKV catalogs 256 → 8 entries (8 → 3-bit
   indices) is ~free once the net trains through the snap: the data walks over to the palette.
 - **Shift-PQ (Level 7)** — the shifts get the catalog treatment too; PQ at 80 b beat int2 at 128 b.
-  Separate catalogs per role (time-mix / channel-mix) and chunk position; 64 entries is the floor.
+  Separate catalogs per role (time-mix / channel-mix) and chunk position. 64 entries looked like the
+  floor for 8-dim chunks — until Level 10 re-spent the same bits as 2 chunks × 4,096 entries.
+- **Index bits ≠ catalog size (Level 10)** — the card pays only `log₂(entries)` per chunk; the
+  catalog is global and amortized. At fixed index bits, fewer chunks × much bigger catalogs = more
+  capacity for free (m4b6 → m2b12: same 24 b/vector, 64× the swatches). Broke the shift wall.
+- **Joint-uv (Level 11)** — one 1,024-entry catalog of (u, v) direction PAIRS; a single 10-bit code
+  per head picks both. Same index space as 32×32 independent coding, but every entry is a pair that
+  actually occurs — the u/v correlation the product form wastes. The locked champion's WKV coding;
+  also the most seed-stable and per-user-robust scheme measured.
+- **Seed-noise doctrine (postscript)** — run-to-run training noise swings results by up to ~±0.0005
+  imm / ~±0.0018 ahead; any gate pass with a thinner margin must reproduce at a second seed before
+  it counts. Killed the 64-, 56- and 52-bit "wins"; the 72-bit champion passed it (+0.000008 swing).
 - **Capacity wall vs optimization gap** — a scheme that fails *identically* with and without every
   learnable lever is out of representational capacity (32-entry shift catalogs); no training fixes it.
 - **Learnable catalog (Level 8)** — centroids as trainable parameters: frozen hard selection,
@@ -843,10 +947,13 @@ just deploying the 88-bit QAT weights with coarser and coarser norms.
 
 ---
 
-*Grounded in the deployed code: `engine/src/model.rs` (`compress_wkv_state`, `PqCodebook`
-incl. the norm quant, `RWKV_PQ_NORM_BITS`), `scratchpad/pq_train.py` + `pq_train_shift.py`
-(catalog k-means), the QAT kernel in `gpu_train/rwkv/model/csrc/cuda/rwkv7_cuda.cu`
-(`qat_lr_rank1`, learnable-catalog gradients), and `gpu_train/rwkv/model/rwkv_model.py`
-(`fake_pq_shift`, learnable shift catalog). Real numbers computed by
-`scratchpad/pq_explainer_numbers.py` on a real WKV state; every log-loss above is a 400-user
-held-out measurement recorded in `research_log_h2k16.md`.*
+*Grounded in the deployed code: `engine/src/model.rs` (`compress_wkv_state`, `PqCodebook` incl.
+the norm quant and the joint-uv encode `encode_decode_joint`, `RWKV_PQ_NORM_BITS`),
+`scratchpad/pq_train.py` + `pq_train_shift.py` + `pq_train_juv.py` (catalog k-means, incl. the
+joint pair catalog), the QAT kernel in `gpu_train/rwkv/model/csrc/cuda/rwkv7_cuda.cu`
+(`qat_lr_rank1`, joint branch, learnable-catalog gradients), and
+`gpu_train/rwkv/model/rwkv_model.py` (`fake_pq_shift`, learnable shift catalog). The deployed
+champion artifacts: `reference/qat_pq_q72u.safetensors` + `pq_cb_wkv_q72u.txt` +
+`pq_cb_shift_q72u.txt`. Real numbers computed by `scratchpad/pq_explainer_numbers.py` on a real
+WKV state; every log-loss above is a 400-user held-out measurement recorded in
+`research_log_h2k16.md`.*
